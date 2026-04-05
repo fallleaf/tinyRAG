@@ -1,0 +1,25 @@
+# ==========================================
+# RAG System Dependencies
+# 推荐 Python 版本: >= 3.10
+# ==========================================
+
+# --- 核心与配置层 ---
+pydantic>=2.0          # 数据契约校验与配置解析 (config.py, models.py)
+PyYAML>=6.0.1          # YAML 配置文件读取 (config.yaml, markdown_splitter.py)
+loguru>=0.7.2          # 结构化日志系统 (全局日志替换 print/logging)
+tqdm>=4.66.2           # 索引构建进度条 (build_index.py)
+
+# --- AI 嵌入与向量检索 ---
+fastembed>=0.4.0       # 轻量级 ONNX 嵌入模型引擎 (model_factory.py)
+# 注: fastembed 会自动拉取 onnxruntime 与 numpy
+
+sqlite-vec>=0.1.6      # SQLite 向量搜索扩展 (database.py, hybrid_engine.py)
+
+# --- MCP 协议服务层 ---
+mcp>=1.0.0             # Model Context Protocol 官方 SDK (server.py)
+
+# --- 可选依赖 (按需取消注释) ---
+# aiosqlite>=0.20.0    # 若未来迁移至全异步 DB 操作
+# psutil>=5.9.0        # 若需监控内存/进程资源 (vacuum.py 增强版)
+# pytest>=7.4.0        # 单元测试框架
+# ruff>=0.1.0          # 代码格式与 Lint 工具

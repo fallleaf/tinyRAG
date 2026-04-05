@@ -1,0 +1,57 @@
+# config.yaml
+# RAG System 核心配置文件
+
+# 知识库仓库路径 (支持多个)
+vaults:
+  - path: "~/NanobotMemory"
+    name: personal
+    enabled: true
+  - path: "~/Obsidian"
+    name: work
+    enabled: true
+
+# 数据库配置
+db_path: "./data/rag.db"
+
+# 嵌入模型配置
+embedding_model:
+  name: "BAAI/bge-small-zh-v1.5"
+  cache_dir: "./models"
+  size: "small"
+  dimensions: 512
+  unload_after_seconds: 30
+
+# 分块配置
+chunking:
+  max_tokens: 512
+  overlap: 50
+
+# 置信度与融合权重
+confidence:
+  path_rules:
+    - pattern: "03.日记/"
+      weight: 1.2
+    - pattern: "07.项目/"
+      weight: 1.1
+    - pattern: "**"
+      weight: 1.0
+  type_rules:
+    code: 1.1
+    table: 1.05
+    header: 1.0
+    text: 0.95
+    list: 0.9
+  fusion:
+    alpha: 0.6
+    beta: 0.2
+
+# 内存限制 (MB)
+memory_limit_mb: 1000
+
+# 日志级别
+log_level: "DEBUG"
+
+# 数据库维护策略
+maintenance:
+  soft_delete_threshold: 0.2
+  auto_vacuum: true
