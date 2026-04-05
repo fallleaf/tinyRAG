@@ -3,7 +3,7 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "rag-system-new"
+name = "tinyRAG"
 version = "0.1.0"
 description = "本地知识库检索增强系统，支持混合检索（向量 + 关键词）"
 readme = "README.md"
@@ -47,10 +47,10 @@ rag-build = "build_index:main"
 rag-server = "mcp_server.server:main"
 
 [project.urls]
-Homepage = "https://github.com/fallleaf/rag_system_new"
-Documentation = "https://github.com/fallleaf/rag_system_new/docs"
-Repository = "https://github.com/fallleaf/rag_system_new.git"
-Issues = "https://github.com/fallleaf/rag_system_new/issues"
+Homepage = "https://github.com/fallleaf/tinyRAG"
+Documentation = "https://github.com/fallleaf/tinyRAG/docs"
+Repository = "https://github.com/fallleaf/tinyRAG.git"
+Issues = "https://github.com/fallleaf/tinyRAG/issues"
 
 [tool.setuptools]
 packages = ["chunker", "embedder", "retriever", "scanner", "storage", "mcp_server", "utils"]

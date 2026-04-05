@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-rag_cli.py - RAG System 命令行检索与运维工具
+rag_cli.py - tinyRAG 命令行检索与运维工具
 基于 retriever/hybrid_engine.py 的 HybridRetriever 实现
 功能:
 - search: 执行混合检索
@@ -33,7 +33,7 @@ logger = setup_logger(level="INFO", log_file="logs/cli.log")
 
 def cmd_status(args):
     """显示系统状态"""
-    print("\n📊 RAG System 状态\n")
+    print("\n📊 tinyRAG 状态\n")
     try:
         cfg = load_config()
         db_path = Path(cfg.db_path).resolve()
@@ -176,7 +176,7 @@ def cmd_config(args):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="RAG System CLI 工具 (检索 / 状态检查 / 配置管理)",
+        description="tinyRAG CLI 工具 (检索 / 状态检查 / 配置管理)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:

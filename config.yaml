@@ -1,5 +1,5 @@
 # config.yaml
-# RAG System 核心配置文件
+# tinyRAG 核心配置文件
 
 # 知识库仓库路径 (支持多个)
 vaults:

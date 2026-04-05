@@ -1,4 +1,4 @@
-# RAG System New - 部署与运维指南
+# tinyRAG - 部署与运维指南
 
 ## 📋 目录
 - [环境要求](#环境要求)
@@ -58,8 +58,8 @@ brew install python@3.12 git
 
 ```bash
 # 克隆项目
-git clone <repository-url> rag_system_new
-cd rag_system_new
+git clone <repository-url> tinyRAG
+cd tinyRAG
 
 # 创建虚拟环境
 python3.12 -m venv .venv
@@ -83,7 +83,7 @@ python3 -c "import fastembed; print('✅ fastembed installed')"
 ./init_env.py
 
 # 输出示例：
-# 🔍 RAG System 环境初始化...
+# 🔍 tinyRAG 环境初始化...
 # ✅ 目录就绪: ./data
 # ✅ 目录就绪: ./models
 # ✅ 目录就绪: ./logs
@@ -195,8 +195,8 @@ sudo nano /etc/systemd/system/rag-system.service
 内容：
 ```ini
 [Unit]
-Description=RAG System Knowledge Base Service
-Documentation=https://github.com/your-org/rag_system_new
+Description=tinyRAG Knowledge Base Service
+Documentation=https://github.com/your-org/tinyRAG
 After=network.target
 Wants=network-online.target
 
@@ -204,10 +204,10 @@ Wants=network-online.target
 Type=simple
 User=fallleaf
 Group=fallleaf
-WorkingDirectory=/home/fallleaf/rag_system_new
-Environment="PATH=/home/fallleaf/rag_system_new/.venv/bin"
-Environment="RAG_CONFIG_PATH=/home/fallleaf/rag_system_new/config.yaml"
-ExecStart=/home/fallleaf/rag_system_new/.venv/bin/python ./mcp_server/server.py
+WorkingDirectory=/home/fallleaf/tinyRAG
+Environment="PATH=/home/fallleaf/tinyRAG/.venv/bin"
+Environment="RAG_CONFIG_PATH=/home/fallleaf/tinyRAG/config.yaml"
+ExecStart=/home/fallleaf/tinyRAG/.venv/bin/python ./mcp_server/server.py
 Restart=on-failure
 RestartSec=10
 StandardOutput=journal
@@ -223,8 +223,8 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/home/fallleaf/rag_system_new/data
-ReadWritePaths=/home/fallleaf/rag_system_new/logs
+ReadWritePaths=/home/fallleaf/tinyRAG/data
+ReadWritePaths=/home/fallleaf/tinyRAG/logs
 
 [Install]
 WantedBy=multi-user.target
@@ -357,7 +357,7 @@ tail -n 100 logs/rag.log
 du -sh data/
 
 # 监控内存使用
-ps aux | grep rag_system
+ps aux | grep tinyrag
 
 # 监控索引构建进度
 tail -f logs/build_index.log
@@ -372,13 +372,13 @@ tail -f logs/build_index.log
 crontab -e
 
 # 每天凌晨 2 点清理数据库
-0 2 * * * cd /home/fallleaf/rag_system_new && ./.venv/bin/python vacuum.py
+0 2 * * * cd /home/fallleaf/tinyRAG && ./.venv/bin/python vacuum.py
 
 # 每周日凌晨 3 点重建索引
-0 3 * * 0 cd /home/fallleaf/rag_system_new && ./.venv/bin/python build_index.py --force
+0 3 * * 0 cd /home/fallleaf/tinyRAG && ./.venv/bin/python build_index.py --force
 
 # 每天清理旧日志
-0 3 * * * find /home/fallleaf/rag_system_new/logs -name "*.log.*" -mtime +30 -delete
+0 3 * * * find /home/fallleaf/tinyRAG/logs -name "*.log.*" -mtime +30 -delete
 ```
 
 ---
@@ -456,9 +456,9 @@ retrieval:
 #!/bin/bash
 # backup.sh
 
-BACKUP_DIR="/backup/rag_system"
+BACKUP_DIR="/backup/tinyrag"
 DATE=$(date +%Y%m%d_%H%M%S)
-PROJECT_DIR="/home/fallleaf/rag_system_new"
+PROJECT_DIR="/home/fallleaf/tinyRAG"
 
 # 创建备份目录
 mkdir -p $BACKUP_DIR
@@ -486,10 +486,10 @@ echo "✅ 备份完成：$BACKUP_DIR"
 sudo systemctl stop rag-system
 
 # 2. 恢复数据库
-cp /backup/rag_system/rag.db.20260405_120000 ./data/rag.db
+cp /backup/tinyrag/rag.db.20260405_120000 ./data/rag.db
 
 # 3. 恢复配置
-cp /backup/rag_system/config.20260405_120000 ./config.yaml
+cp /backup/tinyrag/config.20260405_120000 ./config.yaml
 
 # 4. 启动服务
 sudo systemctl start rag-system
@@ -502,8 +502,8 @@ sudo systemctl start rag-system
 
 ## 📞 技术支持
 
-- **Issue 反馈**: [GitHub Issues](https://github.com/your-org/rag_system_new/issues)
-- **文档**: [Wiki](https://github.com/your-org/rag_system_new/wiki)
+- **Issue 反馈**: [GitHub Issues](https://github.com/your-org/tinyRAG/issues)
+- **文档**: [Wiki](https://github.com/your-org/tinyRAG/wiki)
 - **社区**: [Discord](https://discord.gg/your-invite)
 
 ---

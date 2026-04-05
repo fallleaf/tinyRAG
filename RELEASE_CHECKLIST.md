@@ -1,4 +1,4 @@
-# RAG System New - 发布准备清单
+# tinyRAG - 发布准备清单
 
 ## ✅ 已完成项
 
@@ -118,7 +118,7 @@ echo "✅ 已创建 LICENSE (MIT)"
 
 # 3. 创建根目录 README.md
 cat > README.md << 'EOF'
-# RAG System New
+# tinyRAG
 
 > 本地知识库检索增强系统，支持混合检索（向量 + 关键词），专为电信行业知识管理设计。
 
@@ -126,8 +126,8 @@ cat > README.md << 'EOF'
 
 ```bash
 # 克隆项目
-git clone <repo-url> rag_system_new
-cd rag_system_new
+git clone <repo-url> tinyRAG
+cd tinyRAG
 
 # 安装依赖
 pip install -r requirements.txt

@@ -1,4 +1,4 @@
-# RAG System New - 快速参考卡
+# tinyRAG - 快速参考卡
 
 ## 🚀 常用命令速查
 
@@ -125,7 +125,7 @@ vaults:
 ## 📁 目录结构速览
 
 ```
-rag_system_new/
+tinyRAG/
 ├── data/           # 数据库和缓存
 │   └── rag.db
 ├── models/         # 嵌入模型

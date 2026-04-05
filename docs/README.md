@@ -1,4 +1,4 @@
-# RAG System New - 知识库检索增强系统
+# tinyRAG - 知识库检索增强系统
 
 > **RAG (Retrieval-Augmented Generation)** 系统，基于本地知识库构建，支持混合检索（向量 + 关键词），专为电信行业知识管理设计。
 
@@ -46,7 +46,7 @@
 ## 🏗️ 系统架构
 
 ```
-rag_system_new/
+tinyRAG/
 ├── build_index.py        # 索引构建主程序
 ├── rag_cli.py            # 命令行工具
 ├── init_env.py           # 环境初始化与自检
@@ -187,8 +187,8 @@ vaults:
 ### 1. 生产环境部署
 ```bash
 # 1. 克隆代码
-git clone <repo-url> rag_system_new
-cd rag_system_new
+git clone <repo-url> tinyRAG
+cd tinyRAG
 
 # 2. 安装依赖
 pip install -r requirements.txt
@@ -224,14 +224,14 @@ CMD ["./mcp_server/server.py"]
 创建 `/etc/systemd/system/rag-system.service`:
 ```ini
 [Unit]
-Description=RAG System Service
+Description=tinyRAG Service
 After=network.target
 
 [Service]
 Type=simple
 User=fallleaf
-WorkingDirectory=/home/fallleaf/rag_system_new
-ExecStart=/home/fallleaf/rag_system_new/.venv/bin/python ./mcp_server/server.py
+WorkingDirectory=/home/fallleaf/tinyRAG
+ExecStart=/home/fallleaf/tinyRAG/.venv/bin/python ./mcp_server/server.py
 Restart=always
 
 [Install]

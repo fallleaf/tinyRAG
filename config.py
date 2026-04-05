@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-config.py - RAG System 配置契约与加载层
+config.py - tinyRAG 配置契约与加载层
 特性:
 1. Pydantic v2 强类型校验
 2. 路径自动展开 (~ -> 绝对路径)

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-build_index.py - RAG System 高性能索引构建器
+build_index.py - tinyRAG 高性能索引构建器
 修复说明:
 1. ✅ 修复 vault_configs 元组访问错误 (v[0] 替代 v.name)
 2. ✅ Pydantic v2 兼容: .dict() → .model_dump()
@@ -79,7 +79,7 @@ def process_file_worker(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="RAG System 高性能索引构建器")
+    parser = argparse.ArgumentParser(description="tinyRAG 高性能索引构建器")
     parser.add_argument("--force", action="store_true", help="重建所有索引")
     parser.add_argument("--batch-size", type=int, default=128, help="向量化批大小")
     args = parser.parse_args()

@@ -6,7 +6,7 @@ from pathlib import Path
 
 
 def init():
-    print("🔍 RAG System 环境初始化...")
+    print("🔍 tinyRAG 环境初始化...")
 
     # 1. 检查核心目录
     for d in ["data", "models", "logs"]:

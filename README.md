@@ -1,4 +1,4 @@
-# RAG System New
+# tinyRAG
 
 > 本地知识库检索增强系统，支持混合检索（向量 + 关键词），专为电信行业知识管理设计。
 
@@ -9,8 +9,8 @@
 
 ```bash
 # 克隆项目
-git clone <repo-url> rag_system_new
-cd rag_system_new
+git clone <repo-url> tinyRAG
+cd tinyRAG
 
 # 安装依赖
 pip install -r requirements.txt
@@ -43,7 +43,7 @@ pip install -r requirements.txt
 ## 🏗️ 系统架构
 
 ```
-rag_system_new/
+tinyRAG/
 ├── build_index.py        # 索引构建
 ├── rag_cli.py            # CLI 工具
 ├── init_env.py           # 环境初始化

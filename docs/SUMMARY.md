@@ -1,4 +1,4 @@
-# RAG System New - 文档索引
+# tinyRAG - 文档索引
 
 ## 📚 文档列表
 
