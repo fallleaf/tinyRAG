@@ -25,7 +25,7 @@ async def main():
     config_path = script_dir / "config.yaml"
     if not config_path.exists():
         logger.critical(f"❌ 配置文件缺失：{config_path}")
-        logger.critical("请确保 config.yaml 存在于 tinyrag 根目录")
+        logger.critical("请确保 config.yaml 存在于 tinyRAG 根目录")
         sys.exit(1)
 
     logger.info("🌟 轻量级中文 RAG 系统启动")

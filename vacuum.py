@@ -39,7 +39,8 @@ def check_vacuum_needed(db: DatabaseManager) -> dict:
     chunks_ratio = (chunks_deleted / chunks_total * 100) if chunks_total > 0 else 0
 
     # 获取数据库文件大小
-    db_path = os.path.expanduser("~/tinyrag/data/rag.db")
+    # 使用相对于脚本目录的路径，避免大小写和绝对路径问题
+    db_path = os.path.join(script_dir, "data", "rag.db")
     file_size_mb = os.path.getsize(db_path) / (1024 * 1024)
 
     # 取较高的比例作为判断依据
@@ -179,10 +180,10 @@ def main():
                     # 验证结果
                     new_stats = check_vacuum_needed(db)
 
-                    # 检查文件大小变化
-                    new_size = os.path.getsize(
-                        os.path.expanduser("~/tinyrag/data/rag.db")
-                    ) / (1024 * 1024)
+    # 检查文件大小变化
+    new_size = os.path.getsize(
+        os.path.join(script_dir, "data", "rag.db")
+    ) / (1024 * 1024)
                     saved = stats["file_size_mb"] - new_size
                     if saved > 0:
                         logger.success(
