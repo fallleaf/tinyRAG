@@ -143,9 +143,7 @@ class BaseTool:
         raise NotImplementedError
 
     def to_mcp_tool(self) -> Tool:
-        return Tool(
-            name=self.name, description=self.description, inputSchema=self.schema
-        )
+        return Tool(name=self.name, description=self.description, inputSchema=self.schema)
 
 
 class SearchTool(BaseTool):
@@ -171,9 +169,7 @@ class SearchTool(BaseTool):
             args.get("mode", "hybrid"),
             min(max(args.get("top_k", 10), 1), 100),
         )
-        results = await asyncio.to_thread(
-            self.ctx.retriever.search, query, mode=mode, top_k=top_k
-        )
+        results = await asyncio.to_thread(self.ctx.retriever.search, query, mode=mode, top_k=top_k)
         return {
             "query": query,
             "total": len(results),
@@ -196,11 +192,7 @@ class ScanTool(BaseTool):
 
     async def run(self, args):
         await self.ctx.initialize()
-        vault_configs = (
-            [(f"v_{i}", p) for i, p in enumerate(self.ctx.config.vaults)]
-            if self.ctx.config
-            else []
-        )
+        vault_configs = [(f"v_{i}", p) for i, p in enumerate(self.ctx.config.vaults)] if self.ctx.config else []
         report = await asyncio.to_thread(self.ctx.scanner.scan_vaults, vault_configs)
         await asyncio.to_thread(self.ctx.scanner.process_report, report)
         return {
@@ -257,11 +249,7 @@ class ToolRegistry:
         if name not in self.tools:
             raise ValueError(f"Unknown tool: {name}")
         result = await self.tools[name].run(args)
-        return [
-            TextContent(
-                type="text", text=json.dumps(result, ensure_ascii=False, indent=2)
-            )
-        ]
+        return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
 
 
 class RagServer:

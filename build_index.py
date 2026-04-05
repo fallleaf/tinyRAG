@@ -64,9 +64,7 @@ def json_serialize(obj):
     raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
 
-def process_file_worker(
-    file_item: dict, splitter: MarkdownSplitter
-) -> tuple[int, list[Any], str]:
+def process_file_worker(file_item: dict, splitter: MarkdownSplitter) -> tuple[int, list[Any], str]:
     """并行分块任务单元"""
     abs_path = Path(file_item["absolute_path"])
     try:
@@ -128,18 +126,14 @@ def main():
     files_to_index = []
     if args.force:
         logger.info("🔄 模式：强制重建所有索引")
-        cursor = db.conn.execute(
-            "SELECT id, absolute_path, file_path FROM files WHERE is_deleted = 0"
-        )
+        cursor = db.conn.execute("SELECT id, absolute_path, file_path FROM files WHERE is_deleted = 0")
         files_to_index = [dict(row) for row in cursor.fetchall()]
         db.conn.execute("DELETE FROM fts5_index")
         db.conn.execute("DELETE FROM vectors")
         db.conn.execute("DELETE FROM chunks")
     else:
         logger.info("🔄 模式：增量更新")
-        changed_paths = [
-            f.absolute_path for f in report.new_files + report.modified_files
-        ]
+        changed_paths = [f.absolute_path for f in report.new_files + report.modified_files]
 
         if changed_paths:
             placeholders = ",".join(["?"] * len(changed_paths))
@@ -159,9 +153,7 @@ def main():
         """)
         missing_chunks_files = [dict(row) for row in cursor.fetchall()]
         if missing_chunks_files:
-            logger.info(
-                f"⚠️ 发现 {len(missing_chunks_files)} 个文件缺少 chunks，补充索引中..."
-            )
+            logger.info(f"⚠️ 发现 {len(missing_chunks_files)} 个文件缺少 chunks，补充索引中...")
             files_to_index.extend(missing_chunks_files)
 
     if not files_to_index:
@@ -173,18 +165,14 @@ def main():
     all_pending_chunks = []
 
     with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
-        results = executor.map(
-            lambda f: process_file_worker(f, splitter), files_to_index
-        )
+        results = executor.map(lambda f: process_file_worker(f, splitter), files_to_index)
         for f_id, chunks, f_path in results:
             for c in chunks:
                 all_pending_chunks.append((f_id, c, f_path))
 
     # 5. 分批向量化与入库
     total_chunks = len(all_pending_chunks)
-    logger.info(
-        f"🧩 待向量化块总数：{total_chunks}，采用 Batch Size: {args.batch_size}"
-    )
+    logger.info(f"🧩 待向量化块总数：{total_chunks}，采用 Batch Size: {args.batch_size}")
 
     try:
         from tqdm import tqdm
@@ -207,13 +195,9 @@ def main():
             continue
 
         try:
-            for idx, ((file_id, chunk, f_path), emb) in enumerate(
-                zip(batch, embeddings)
-            ):
+            for idx, ((file_id, chunk, f_path), emb) in enumerate(zip(batch, embeddings)):
                 try:
-                    metadata_json = json.dumps(
-                        chunk.metadata or {}, ensure_ascii=False, default=json_serialize
-                    )
+                    metadata_json = json.dumps(chunk.metadata or {}, ensure_ascii=False, default=json_serialize)
                 except Exception as e:
                     logger.warning(f"⚠️ metadata 序列化失败，使用空对象：{e}")
                     metadata_json = "{}"

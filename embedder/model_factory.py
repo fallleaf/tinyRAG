@@ -13,9 +13,7 @@ except ImportError:
 
 
 class EmbeddingModel:
-    def __init__(  # ✅ 修复：双下划线
-        self, model_name: str, cache_dir: str, unload_after_seconds: int = 30
-    ):
+    def __init__(self, model_name: str, cache_dir: str, unload_after_seconds: int = 30):  # ✅ 修复：双下划线
         self.model_name = model_name
         self.cache_dir = cache_dir
         self.unload_after_seconds = unload_after_seconds
@@ -29,9 +27,7 @@ class EmbeddingModel:
     def _init_model(self):
         try:
             logger.info(f"🔄 正在加载模型：{self.model_name} ...")
-            self._model = TextEmbedding(
-                model_name=self.model_name, cache_dir=self.cache_dir
-            )
+            self._model = TextEmbedding(model_name=self.model_name, cache_dir=self.cache_dir)
             self._last_used = time.time()
             logger.success(f"✅ 模型加载成功：{self.model_name}")
 

@@ -100,10 +100,7 @@ class Scanner:
 
                         if abs_path in db_files:
                             db_meta = db_files[abs_path]
-                            if (
-                                db_meta["mtime"] == mtime
-                                and db_meta["file_size"] == size
-                            ):
+                            if db_meta["mtime"] == mtime and db_meta["file_size"] == size:
                                 continue
 
                             new_hash = self.calculate_hash(abs_path)
@@ -146,9 +143,7 @@ class Scanner:
                                             old_id=existing["id"],
                                         )
                                     )
-                                    logger.info(
-                                        f"🔄 检测到文件移动：{existing['file_path']} -> {rel_path}"
-                                    )
+                                    logger.info(f"🔄 检测到文件移动：{existing['file_path']} -> {rel_path}")
                             else:
                                 meta = FileMeta(
                                     vault_name,
@@ -174,9 +169,7 @@ class Scanner:
     def process_report(self, report: ScanReport):
         try:
             for meta in report.new_files:
-                existing = self.db.find_file_by_hash(
-                    meta.file_hash, include_deleted=True
-                )
+                existing = self.db.find_file_by_hash(meta.file_hash, include_deleted=True)
                 if existing and existing["is_deleted"] == 1:
                     self.db.conn.execute(
                         """UPDATE files SET

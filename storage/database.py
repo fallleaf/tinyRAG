@@ -39,9 +39,7 @@ class DatabaseManager:
             self.conn.execute("PRAGMA foreign_keys = ON")  # 启用外键级联删除
 
             # 1. 加载 Schema
-            schema_path = os.path.join(
-                os.path.dirname(__file__), "..", "schema_v0.3.2.sql"
-            )
+            schema_path = os.path.join(os.path.dirname(__file__), "..", "schema_v0.3.2.sql")
             if os.path.exists(schema_path):
                 with open(schema_path, encoding="utf-8") as f:
                     self.conn.executescript(f.read())
@@ -124,12 +122,12 @@ class DatabaseManager:
         """)
         logger.info("✅ 基础表创建成功 (降级模式)")
 
-    def find_file_by_hash(
-        self, file_hash: str, include_deleted: bool = False
-    ) -> dict | None:
+    def find_file_by_hash(self, file_hash: str, include_deleted: bool = False) -> dict | None:
         """根据文件哈希查找文件记录"""
         try:
-            sql = "SELECT id, vault_name, file_path, absolute_path, file_hash, is_deleted FROM files WHERE file_hash = ?"
+            sql = (
+                "SELECT id, vault_name, file_path, absolute_path, file_hash, is_deleted FROM files WHERE file_hash = ?"
+            )
             if not include_deleted:
                 sql += " AND is_deleted = 0"
             cursor = self.conn.execute(sql, (file_hash,))

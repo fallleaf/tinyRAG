@@ -55,9 +55,7 @@ class ChunkData:
         self.content_type = content_type
         self.section_title = section_title
         self.section_path = (
-            " / ".join(["Root", *section_path])
-            if isinstance(section_path, list)
-            else str(section_path or "Root")
+            " / ".join(["Root", *section_path]) if isinstance(section_path, list) else str(section_path or "Root")
         )
         self.start_pos = start_pos
         self.end_pos = end_pos
@@ -87,9 +85,7 @@ class MarkdownSplitter:
         self._path_rules = self.confidence_config.get("path_rules", [])
         self._type_rules = self.confidence_config.get("type_rules", {})
         # fusion 参数通常用于检索阶段,此处仅作透传/预留
-        self._fusion_config = self.confidence_config.get(
-            "fusion", {"alpha": 0.6, "beta": 0.2}
-        )
+        self._fusion_config = self.confidence_config.get("fusion", {"alpha": 0.6, "beta": 0.2})
 
     def _calc_path_weight(self, source_path: str) -> float:
         if not self._path_rules or not source_path:
@@ -109,9 +105,7 @@ class MarkdownSplitter:
         if not content.startswith("---"):
             return content, {}
         # 修复:支持末尾无换行/带空格/直接 EOF
-        frontmatter_match = re.match(
-            r"^---\s*\n(.*?)\n---\s*(?:\n|$)", content, re.DOTALL
-        )
+        frontmatter_match = re.match(r"^---\s*\n(.*?)\n---\s*(?:\n|$)", content, re.DOTALL)
         if not frontmatter_match:
             return content, {}
 
@@ -164,9 +158,7 @@ class MarkdownSplitter:
             result[current_key] = current_list
         return result
 
-    def split(
-        self, content: str, file_path: str | None = None, file_id: int = 0
-    ) -> list[ChunkData]:
+    def split(self, content: str, file_path: str | None = None, file_id: int = 0) -> list[ChunkData]:
         self.chunk_counter = 0
         self._current_source_path = file_path or ""  # ✅ 供置信度匹配使用
 
@@ -204,9 +196,7 @@ class MarkdownSplitter:
             # 2. 代码块检测 (支持 ```, ~~~ 及多反引号)
             fence_match = re.match(r"^(`{3,}|~{3,})\s*(\w+)?", line)
             if fence_match:
-                fence_char, fence_len = fence_match.group(1)[0], len(
-                    fence_match.group(1)
-                )
+                fence_char, fence_len = fence_match.group(1)[0], len(fence_match.group(1))
                 if current_type != ChunkType.CODE:
                     if current_buffer:
                         chunks.extend(

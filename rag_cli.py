@@ -45,16 +45,10 @@ def cmd_status(args):
 
             db = DatabaseManager(str(db_path))
             try:
-                chunk_count = db.conn.execute(
-                    "SELECT COUNT(*) FROM chunks WHERE is_deleted=0"
-                ).fetchone()[0]
-                file_count = db.conn.execute(
-                    "SELECT COUNT(*) FROM files WHERE is_deleted=0"
-                ).fetchone()[0]
+                chunk_count = db.conn.execute("SELECT COUNT(*) FROM chunks WHERE is_deleted=0").fetchone()[0]
+                file_count = db.conn.execute("SELECT COUNT(*) FROM files WHERE is_deleted=0").fetchone()[0]
                 print(f"   活跃 Chunk:{chunk_count} | 活跃 Files:{file_count}")
-                print(
-                    f"   向量支持:{'✅ 已启用' if db.vec_support else '⚠️ 已降级(FTS5)'}"
-                )
+                print(f"   向量支持:{'✅ 已启用' if db.vec_support else '⚠️ 已降级(FTS5)'}")
             finally:
                 db.close()
         else:
@@ -94,16 +88,8 @@ def cmd_search(args):
             return 1
 
         # 权重配置
-        alpha = (
-            args.alpha
-            if args.alpha is not None
-            else cfg.confidence.fusion.get("alpha", 0.6)
-        )
-        beta = (
-            args.beta
-            if args.beta is not None
-            else cfg.confidence.fusion.get("beta", 0.2)
-        )
+        alpha = args.alpha if args.alpha is not None else cfg.confidence.fusion.get("alpha", 0.6)
+        beta = args.beta if args.beta is not None else cfg.confidence.fusion.get("beta", 0.2)
 
         # ✅ 核心修复:强制提取 vault name 字符串,兼容新旧配置结构
         if args.vaults:
@@ -114,9 +100,7 @@ def cmd_search(args):
                 enabled = getattr(v, "enabled", True)
                 if enabled:
                     vaults.append(getattr(v, "name", str(v)))
-            vaults = (
-                vaults if vaults else None
-            )  # ⚠️ 必须转为 None,否则 _fetch_results 会拦截全库
+            vaults = vaults if vaults else None  # ⚠️ 必须转为 None,否则 _fetch_results 会拦截全库
 
         logger.info(f"🔍 检索参数: alpha={alpha}, beta={beta}, vaults={vaults}")
 
@@ -130,9 +114,7 @@ def cmd_search(args):
         )
 
         start = time.time()
-        results = retriever.search(
-            query=args.query, mode=args.mode, top_k=args.top_k, vaults=vaults
-        )
+        results = retriever.search(query=args.query, mode=args.mode, top_k=args.top_k, vaults=vaults)
         elapsed = time.time() - start
 
         print(f"\n📊 检索结果 ({len(results)} 条,耗时 {elapsed:.2f}s):\n")
@@ -141,9 +123,7 @@ def cmd_search(args):
             return 0
 
         for i, r in enumerate(results, 1):
-            content_preview = (
-                r.content[:200] + "..." if len(r.content) > 200 else r.content
-            )
+            content_preview = r.content[:200] + "..." if len(r.content) > 200 else r.content
             scores = f"最终={r.final_score:.3f} | 语义={r.semantic_score:.3f} | 关键词={r.keyword_score:.3f} | 置信度={r.confidence_score:.2f}"
             print(f"{i}. [{scores}]")
             print(f"   来源:{r.absolute_path}")

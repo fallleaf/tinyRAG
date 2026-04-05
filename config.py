@@ -119,8 +119,6 @@ if __name__ == "__main__":
         print("✅ 配置加载成功")
         print(f"📂 启用仓库: {[v.name for v in cfg.vaults if v.enabled]}")
         print(f"🗄️ 数据库路径: {cfg.db_path}")
-        print(
-            f"🤖 模型: {cfg.embedding_model.name} (dim={cfg.embedding_model.dimensions})"
-        )
+        print(f"🤖 模型: {cfg.embedding_model.name} (dim={cfg.embedding_model.dimensions})")
     except Exception as e:
         print(e)

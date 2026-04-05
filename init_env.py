@@ -32,9 +32,7 @@ def init():
         from config import load_config
 
         cfg = load_config("config.yaml")
-        print(
-            f"✅ 配置加载成功 | DB: {cfg.db_path} | Model: {cfg.embedding_model.cache_dir}"
-        )
+        print(f"✅ 配置加载成功 | DB: {cfg.db_path} | Model: {cfg.embedding_model.cache_dir}")
 
         # 检查 vaults
         valid_vaults = [v for v in cfg.vaults if Path(v).expanduser().exists()]
@@ -51,9 +49,7 @@ def init():
     try:
         from fastembed import TextEmbedding
 
-        TextEmbedding(
-            model_name=cfg.embedding_model.name, cache_dir=cfg.embedding_model.cache_dir
-        )
+        TextEmbedding(model_name=cfg.embedding_model.name, cache_dir=cfg.embedding_model.cache_dir)
         print("✅ 模型缓存就绪")
     except Exception as e:
         print(f"❌ 模型下载失败: {e}\n请检查网络或手动设置 HTTP_PROXY")

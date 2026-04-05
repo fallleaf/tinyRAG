@@ -120,9 +120,7 @@ class HybridRetriever:
 
     def _get_cache(self):
         if CACHE_AVAILABLE and self._cache is None:
-            self._cache = get_cache(
-                db_path=self.cache_db_path, ttl_seconds=self.cache_ttl
-            )
+            self._cache = get_cache(db_path=self.cache_db_path, ttl_seconds=self.cache_ttl)
         return self._cache
 
     def search(
@@ -135,19 +133,14 @@ class HybridRetriever:
         if top_k is None:
             top_k = self.final_top_k
         # ✅ 缓存键包含权重，避免配置变更导致脏缓存
-        cache_key = (
-            f"{query}|{mode}|{top_k}|{sorted(vaults or [])}|a{self.alpha}|b{self.beta}"
-        )
+        cache_key = f"{query}|{mode}|{top_k}|{sorted(vaults or [])}|a{self.alpha}|b{self.beta}"
 
         cache = self._get_cache()
         if cache:
             cached = cache.get(cache_key)
             if cached:
                 logger.debug(f"🎯 持久化缓存命中：'{query}'")
-                return [
-                    RetrievalResult(**{k: v for k, v in item.items()})
-                    for item in cached
-                ]
+                return [RetrievalResult(**{k: v for k, v in item.items()}) for item in cached]
 
         if cache_key in self._memory_cache:
             results, ts = self._memory_cache[cache_key]
@@ -164,9 +157,7 @@ class HybridRetriever:
         self._memory_cache[cache_key] = (results, time.time())
         return results
 
-    def _search_internal(
-        self, query: str, mode: str, top_k: int, vaults: list[str] | None
-    ) -> list[RetrievalResult]:
+    def _search_internal(self, query: str, mode: str, top_k: int, vaults: list[str] | None) -> list[RetrievalResult]:
         # ✅ 修复 P0：实际调用检索方法
         limit = top_k * 2
         vec_scores = {}
@@ -181,13 +172,9 @@ class HybridRetriever:
             return []
 
         rrf_scores = self._rrf_fusion(vec_scores, kw_ranks)
-        return self._fetch_results_with_metadata(
-            rrf_scores, vec_scores, kw_ranks, vaults
-        )
+        return self._fetch_results_with_metadata(rrf_scores, vec_scores, kw_ranks, vaults)
 
-    def _vector_search(
-        self, query: str, limit: int, vaults: list[str] | None
-    ) -> dict[int, float]:
+    def _vector_search(self, query: str, limit: int, vaults: list[str] | None) -> dict[int, float]:
         """向量检索 (严格遵循 sqlite-vec KNN 语法规范)"""
         if not self.db.vec_support:
             return {}
@@ -217,13 +204,10 @@ class HybridRetriever:
             logger.error(f"❌ 向量检索失败：{e}", exc_info=True)
             return {}
 
-    def _keyword_search(
-        self, query: str, limit: int, vaults: list[str] | None
-    ) -> dict[int, int]:
+    def _keyword_search(self, query: str, limit: int, vaults: list[str] | None) -> dict[int, int]:
         keywords = query.split() or [query]
         like_conds = " OR ".join(
-            ["(LOWER(c.content) LIKE LOWER(?) OR LOWER(c.section_title) LIKE LOWER(?))"]
-            * len(keywords)
+            ["(LOWER(c.content) LIKE LOWER(?) OR LOWER(c.section_title) LIKE LOWER(?))"] * len(keywords)
         )
         sql = f"SELECT c.id FROM chunks c JOIN files f ON c.file_id = f.id WHERE ({like_conds}) AND c.is_deleted = 0 AND f.is_deleted = 0"
         params = [f"%{kw.lower()}%" for kw in keywords for _ in range(2)]
@@ -237,14 +221,9 @@ class HybridRetriever:
         rows = cursor.fetchall()
         return {row["id"]: i + 1 for i, row in enumerate(rows[:limit])}
 
-    def _rrf_fusion(
-        self, vec_scores: dict[int, float], kw_ranks: dict[int, int]
-    ) -> dict[int, float]:
+    def _rrf_fusion(self, vec_scores: dict[int, float], kw_ranks: dict[int, int]) -> dict[int, float]:
         vec_ranks = {
-            cid: rank
-            for rank, (cid, _) in enumerate(
-                sorted(vec_scores.items(), key=lambda x: x[1], reverse=True), 1
-            )
+            cid: rank for rank, (cid, _) in enumerate(sorted(vec_scores.items(), key=lambda x: x[1], reverse=True), 1)
         }
         rrf_scores = {}
         for cid in set(vec_ranks) | set(kw_ranks):
@@ -266,9 +245,7 @@ class HybridRetriever:
         row_map = {row["id"]: dict(row) for row in cursor.fetchall()}
 
         final_results = []
-        for cid, rrf_score in sorted(
-            rrf_scores.items(), key=lambda x: x[1], reverse=True
-        ):
+        for cid, rrf_score in sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True):
             row = row_map.get(cid)
             if not row:
                 continue
@@ -294,9 +271,7 @@ class HybridRetriever:
                     keyword_score=kw_score,
                     confidence_score=conf_w,
                     final_score=final_score,
-                    confidence_reason=self._generate_reason(
-                        row["file_path"], row["content_type"], conf_w
-                    ),
+                    confidence_reason=self._generate_reason(row["file_path"], row["content_type"], conf_w),
                     file_hash=row["file_hash"],
                 )
             )
