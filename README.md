@@ -9,7 +9,7 @@
 
 ```bash
 # 克隆项目
-git clone <repo-url> tinyRAG
+git clone https://github.com/fallleaf/tinyRAG tinyRAG
 cd tinyRAG
 
 # 安装依赖
