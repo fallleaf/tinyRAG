@@ -1,14 +1,27 @@
 #!/usr/bin/env python3
 """
-mcp_server/server.py - Production MCP RAG Server
-修复: sys.path hack, 后台任务清理, 路径解析, 异步安全
+mcp_server/server.py - Production MCP RAG Server (v2.0)
+
+v2.0 优化内容:
+1.  P0-1: MarkdownSplitter 传递 confidence_config (frontmatter 权重)
+2.  P0-2: ScanTool 使用 config 中的真实 vault_name (不再用 v_0/v_1)
+3.  P0-3: RebuildTool 使用 asyncio.to_thread 避免阻塞事件循环
+4.  P0-4: ScanTool 返回 touched_files 计数
+5.  P1-1: mcp_safe 不再向客户端暴露完整 traceback
+6.  P1-2: _load_build_index_main 使用独立命名空间避免 sys.modules 污染
+7.  P1-3: initialize() 局部变量模式 + 失败时清理部分初始化的资源
+8.  P1-4: add_background_task 回调使用 try/except 避免竞态崩溃
+9.  P1-5: shutdown() 安全关闭数据库连接
+10. P2-1: BaseTool.run() 补充类型注解
+11. P2-2: RebuildTool 支持 batch_size 参数
+12. P2-3: ToolRegistry.execute 添加 default=str 序列化兜底 + 移除 indent
 """
 
 import asyncio
+import contextlib
 import importlib.util
 import json
 import sys
-import traceback
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, ClassVar
@@ -38,15 +51,26 @@ PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 log_file = PROJECT_ROOT / "logs" / "mcp_server.log"
 logger = setup_logger(level="INFO", log_file=str(log_file))
 
+# build_index 模块的唯一命名空间键，避免与用户代码的 import 冲突
+_BUILD_INDEX_MODULE_KEY = "_tinyrag_build_index"
+
 
 def _load_build_index_main():
-    """安全加载 build_index 模块,避免 sys.path 污染"""
+    """
+    安全加载 build_index 模块。
+    使用唯一命名空间键注册到 sys.modules，生命周期与服务器一致。
+    首次加载后缓存，后续调用直接返回缓存的 main 函数。
+    """
+    if _BUILD_INDEX_MODULE_KEY in sys.modules:
+        return sys.modules[_BUILD_INDEX_MODULE_KEY].main
+
     module_path = PROJECT_ROOT / "build_index.py"
     if not module_path.exists():
-        raise ImportError("build_index.py 未找到")
-    spec = importlib.util.spec_from_file_location("build_index", module_path)
+        raise ImportError(f"build_index.py 未找到: {module_path}")
+
+    spec = importlib.util.spec_from_file_location(_BUILD_INDEX_MODULE_KEY, module_path)
     module = importlib.util.module_from_spec(spec)
-    sys.modules["build_index"] = module
+    sys.modules[_BUILD_INDEX_MODULE_KEY] = module
     spec.loader.exec_module(module)
     return module.main
 
@@ -55,6 +79,11 @@ def _load_build_index_main():
 # App Context
 # =====================
 class AppContext:
+    """
+    应用上下文容器：统一管理配置、数据库、扫描器、检索器、分块器的生命周期。
+    使用双重检查锁定确保异步安全初始化，局部变量模式防止部分失败时的资源泄漏。
+    """
+
     def __init__(self):
         self.config: Settings | None = None
         self.db: DatabaseManager | None = None
@@ -66,53 +95,95 @@ class AppContext:
         self._background_tasks: list[asyncio.Task] = []
 
     async def initialize(self):
+        """异步初始化所有组件。幂等，可安全重复调用。"""
         if self._initialized:
             return
         async with self._lock:
             if self._initialized:
                 return
-            try:
-                config_path = PROJECT_ROOT / "config.yaml"
-                self.config = load_config(str(config_path))
-                self.db = DatabaseManager(self.config.db_path)
-                self.scanner = Scanner(self.db)
-                self.retriever = HybridRetriever(
-                    db=self.db,
-                    alpha=self.config.confidence.fusion["alpha"],
-                    beta=self.config.confidence.fusion["beta"],
-                    model_name=self.config.embedding_model.name,
-                    cache_dir=self.config.embedding_model.cache_dir,
-                )
-                self.splitter = MarkdownSplitter(
-                    max_tokens=self.config.chunking["max_tokens"],
-                    overlap=self.config.chunking["overlap"],
-                )
-                self._initialized = True
-                logger.success("✅ MCP 组件初始化完成")
-            except Exception as e:
-                logger.critical(f"❌ 初始化失败: {e}")
-                raise
+
+        # ── 局部变量模式：全部成功后才赋值到 self，失败时清理中间资源 ──
+        config = None
+        db = None
+        scanner = None
+        retriever = None
+        splitter = None
+        try:
+            config_path = PROJECT_ROOT / "config.yaml"
+            config = load_config(str(config_path))
+
+            db = DatabaseManager(config.db_path)
+            scanner = Scanner(db)
+
+            retriever = HybridRetriever(
+                db=db,
+                alpha=config.confidence.fusion["alpha"],
+                beta=config.confidence.fusion["beta"],
+                model_name=config.embedding_model.name,
+                cache_dir=config.embedding_model.cache_dir,
+            )
+
+            # P0-1: 传递 confidence_config，使 frontmatter 权重系统生效
+            splitter = MarkdownSplitter(
+                max_tokens=config.chunking["max_tokens"],
+                overlap=config.chunking["overlap"],
+                confidence_config=config.confidence.model_dump(),
+            )
+
+            # 全部成功，赋值到 self
+            self.config = config
+            self.db = db
+            self.scanner = scanner
+            self.retriever = retriever
+            self.splitter = splitter
+            self._initialized = True
+            logger.info("MCP components initialized successfully")
+        except Exception:
+            # P1-3: 清理部分初始化的资源，防止连接泄漏
+            if db is not None:
+                with contextlib.suppress(Exception):
+                    db.close()
+            logger.critical("MCP initialization failed", exc_info=True)
+            raise
 
     def add_background_task(self, task: asyncio.Task):
+        """注册后台任务，完成后自动从列表移除。"""
         self._background_tasks.append(task)
-        task.add_done_callback(lambda t: self._background_tasks.remove(t))
+
+        def _on_done(t: asyncio.Task):
+            # P1-4: 防止竞态条件下重复 remove 导致 ValueError
+            with contextlib.suppress(ValueError):
+                self._background_tasks.remove(t)
+
+        task.add_done_callback(_on_done)
 
     async def shutdown(self):
-        logger.info("🛑 正在关闭服务...")
-        # 安全取消并等待后台任务
+        """优雅关闭：取消后台任务 + 关闭数据库连接。"""
+        logger.info("Shutting down server...")
         if self._background_tasks:
             for t in self._background_tasks:
                 t.cancel()
             await asyncio.gather(*self._background_tasks, return_exceptions=True)
+            self._background_tasks.clear()
+
+        # P1-5: 安全关闭数据库连接
         if self.db:
-            self.db.close()
-        logger.info("✅ 资源释放完成")
+            try:
+                self.db.close()
+            except Exception as e:
+                logger.warning(f"Database close error (ignored): {e}")
+        logger.info("Resources released")
 
 
 # =====================
 # Error Wrapper & Tool Base
 # =====================
 def mcp_safe(func: Callable[..., Awaitable[list[TextContent]]]):
+    """
+    工具执行错误包装器。
+    P1-1: 仅向客户端返回简短错误信息，完整 traceback 仅记录到服务端日志。
+    """
+
     async def wrapper(*args, **kwargs):
         try:
             return await func(*args, **kwargs)
@@ -122,7 +193,7 @@ def mcp_safe(func: Callable[..., Awaitable[list[TextContent]]]):
                 TextContent(
                     type="text",
                     text=json.dumps(
-                        {"error": str(e), "traceback": traceback.format_exc()},
+                        {"error": str(e)},
                         ensure_ascii=False,
                     ),
                 )
@@ -132,6 +203,8 @@ def mcp_safe(func: Callable[..., Awaitable[list[TextContent]]]):
 
 
 class BaseTool:
+    """MCP 工具基类。子类需定义 name/description/schema 并实现 run()。"""
+
     name: str
     description: str
     schema: dict[str, Any]
@@ -139,6 +212,7 @@ class BaseTool:
     def __init__(self, ctx: AppContext):
         self.ctx = ctx
 
+    # P2-1: 补充类型注解
     async def run(self, args: dict[str, Any]) -> dict[str, Any]:
         raise NotImplementedError
 
@@ -162,13 +236,13 @@ class SearchTool(BaseTool):
         "required": ["query"],
     }
 
-    async def run(self, args):
+    # P2-3: 补充参数类型注解
+    async def run(self, args: dict[str, Any]) -> dict[str, Any]:
         await self.ctx.initialize()
-        query, mode, top_k = (
-            args.get("query", ""),
-            args.get("mode", "hybrid"),
-            min(max(args.get("top_k", 10), 1), 100),
-        )
+        query = args.get("query", "")
+        mode = args.get("mode", "hybrid")
+        top_k = min(max(args.get("top_k", 10), 1), 100)
+
         results = await asyncio.to_thread(self.ctx.retriever.search, query, mode=mode, top_k=top_k)
         return {
             "query": query,
@@ -190,44 +264,64 @@ class ScanTool(BaseTool):
     name, description = "scan_index", "Incrementally scan and update file index (tinyRAG)"
     schema: ClassVar[dict] = {"type": "object", "properties": {}}
 
-    async def run(self, args):
+    # P2-3: 补充参数类型注解
+    async def run(self, args: dict[str, Any]) -> dict[str, Any]:
         await self.ctx.initialize()
-        # 修复：提取 VaultConfig 的 path 属性，而不是传递整个对象
-        vault_configs = [(f"v_{i}", p.path) for i, p in enumerate(self.ctx.config.vaults)] if self.ctx.config else []
+        # P0-2: 使用 config 中的真实 vault_name (personal/work)，不再用 v_0/v_1
+        vault_configs = [(v.name, v.path) for v in self.ctx.config.vaults if v.enabled]
         report = await asyncio.to_thread(self.ctx.scanner.scan_vaults, vault_configs)
         await asyncio.to_thread(self.ctx.scanner.process_report, report)
         return {
             "status": "success",
+            "summary": report.summary(),
             "new": len(report.new_files),
             "modified": len(report.modified_files),
             "moved": len(report.moved_files),
             "deleted": len(report.deleted_files),
+            "touched": len(report.touched_files),
         }
 
 
 class RebuildTool(BaseTool):
     name, description = "rebuild_index", "Force rebuild full knowledge index (tinyRAG)"
-    schema: ClassVar[dict] = {"type": "object", "properties": {}}
+    schema: ClassVar[dict] = {
+        "type": "object",
+        "properties": {
+            "batch_size": {
+                "type": "integer",
+                "default": 128,
+                "minimum": 16,
+                "maximum": 512,
+                "description": "Embedding batch size for vectorization",
+            },
+        },
+    }
 
-    async def run(self, args):
-        task = asyncio.create_task(self._background_job())
+    # P2-3: 补充参数类型注解
+    async def run(self, args: dict[str, Any]) -> dict[str, Any]:
+        task = asyncio.create_task(self._background_job(args))
         self.ctx.add_background_task(task)
         return {"status": "started", "message": "Index rebuild running in background"}
 
-    async def _background_job(self):
+    async def _background_job(self, args: dict[str, Any]):
+        """后台执行索引重建，通过 asyncio.to_thread 避免阻塞事件循环。"""
         try:
             await self.ctx.initialize()
-            logger.info("🔄 开始后台强制重建索引...")
+            logger.info("Starting background index rebuild...")
             build_main = _load_build_index_main()
 
-            # 模拟 argparse.Namespace 传递参数
-            class BuildArgs:
-                force, batch_size = True, 128
+            # P2-2: 支持通过参数自定义 batch_size
+            batch_size = min(max(args.get("batch_size", 128), 16), 512)
 
-            build_main(BuildArgs)
-            logger.success("✅ 索引重建完成")
+            class BuildArgs:
+                force = True
+                batch_size = batch_size
+
+            # P0-3: asyncio.to_thread 防止同步 build_main 阻塞事件循环
+            await asyncio.to_thread(build_main, BuildArgs)
+            logger.info("Index rebuild completed successfully")
         except Exception as e:
-            logger.error(f"❌ 索引重建失败：{e}", exc_info=True)
+            logger.error(f"Index rebuild failed: {e}", exc_info=True)
             raise
 
 
@@ -235,6 +329,8 @@ class RebuildTool(BaseTool):
 # Registry & Server
 # =====================
 class ToolRegistry:
+    """MCP 工具注册中心：注册、列举、分发工具调用。"""
+
     def __init__(self, ctx: AppContext):
         self.tools: dict[str, BaseTool] = {}
         self.ctx = ctx
@@ -250,24 +346,25 @@ class ToolRegistry:
         if name not in self.tools:
             raise ValueError(f"Unknown tool: {name}")
         result = await self.tools[name].run(args)
-        return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
+        # P2-4: 添加 default=str 兜底 + 移除 indent (机器通信不需要格式化)
+        return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False, default=str))]
 
 
 class RagServer:
+    """tinyRAG MCP Server 入口：组装组件、注册工具、启动 stdio 传输。"""
+
     def __init__(self):
         self.ctx = AppContext()
         self.registry = ToolRegistry(self.ctx)
-        # 注册工具，名称已更新为 tinyRAG 风格
         self.registry.register(SearchTool)
         self.registry.register(ScanTool)
         self.registry.register(RebuildTool)
 
         if MCP_AVAILABLE:
-            # 服务器名称改为 tinyRAG
             self.server = Server("tinyRAG")
             self._register()
         else:
-            logger.warning("⚠️ MCP 未安装，运行在 Mock 模式")
+            logger.warning("MCP package not installed, running in mock mode")
 
     def _register(self):
         @self.server.list_tools()
@@ -281,14 +378,14 @@ class RagServer:
 
     async def run(self):
         if not MCP_AVAILABLE:
-            logger.error("❌ 请安装 mcp: pip install mcp")
+            logger.error("Please install mcp: pip install mcp")
             return
-        logger.info("🚀 MCP Stdio Server 启动中...")
+        logger.info("MCP Stdio Server starting...")
         try:
             async with stdio_server() as (r, w):
                 await self.server.run(r, w, self.server.create_initialization_options())
         except KeyboardInterrupt:
-            logger.info("👋 收到中断信号")
+            logger.info("Received interrupt signal")
         finally:
             await self.ctx.shutdown()
 

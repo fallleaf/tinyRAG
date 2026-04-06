@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
 config.py - tinyRAG 配置契约与加载层
-特性:
-1. Pydantic v2 强类型校验
-2. 路径自动展开 (~ -> 绝对路径)
-3. 结构化 Vault 配置 (path, name, enabled)
-4. 安全默认值与缺失字段回退
+v2.0:
+1. 置信度改为 Frontmatter 驱动: doc_type_rules / status_rules / date_decay
+2. 移除 path_rules (文件路径) 和 type_rules (内容块类型)
+3. Pydantic v2 强类型校验
 """
 
 from pathlib import Path
@@ -25,13 +24,53 @@ class VaultConfig(BaseModel):
     @field_validator("path")
     @classmethod
     def expand_vault_path(cls, v: str) -> str:
-        # 仅展开 ~/，不强制要求目录已存在（便于首次部署/动态创建）
         return str(Path(v).expanduser())
 
 
-class ConfidenceRule(BaseModel):
-    pattern: str
-    weight: float = 1.0
+class DateDecayConfig(BaseModel):
+    """日期衰减配置"""
+
+    enabled: bool = True
+    half_life_days: int = 365  # 半衰期(天): 文档超过此天数后权重降为 default * 0.5
+    min_weight: float = 0.5   # 衰减后的权重下限
+
+
+class ConfidenceConfig(BaseModel):
+    """
+    置信度与融合权重配置 (v2.0 - Frontmatter 驱动)
+    
+    权重计算公式:
+        final_weight = doc_type_weight × status_weight × date_weight
+    
+    所有未匹配的字段使用 default_weight
+    """
+
+    # Frontmatter doc_type 权重映射
+    doc_type_rules: dict[str, float] = Field(
+        default_factory=lambda: {
+            "technical": 1.2,
+            "project": 1.15,
+            "meeting": 1.1,
+            "faq": 1.05,
+            "blog": 1.0,
+            "reflection": 0.95,
+        }
+    )
+    # Frontmatter status 权重映射
+    status_rules: dict[str, float] = Field(
+        default_factory=lambda: {
+            "进行中": 1.2,
+            "已完成": 1.0,
+            "待开始": 0.9,
+            "已归档": 0.8,
+        }
+    )
+    # 日期衰减配置
+    date_decay: DateDecayConfig = Field(default_factory=DateDecayConfig)
+    # 未匹配时的默认权重
+    default_weight: float = 1.0
+    # RRF 融合参数 (检索阶段使用, 与分块无关)
+    fusion: dict[str, float] = {"alpha": 0.6, "beta": 0.2}
 
 
 class ModelConfig(BaseModel):
@@ -47,26 +86,6 @@ class ModelConfig(BaseModel):
     @classmethod
     def expand_cache_dir(cls, v: str) -> str:
         return str(Path(v).expanduser())
-
-
-class ConfidenceConfig(BaseModel):
-    """置信度与融合权重配置"""
-
-    path_rules: list[ConfidenceRule] = Field(
-        default_factory=lambda: [
-            ConfidenceRule(pattern="03.日记/", weight=1.2),
-            ConfidenceRule(pattern="07.项目/", weight=1.1),
-            ConfidenceRule(pattern="**", weight=1.0),
-        ]
-    )
-    type_rules: dict[str, float] = {
-        "code": 1.1,
-        "table": 1.05,
-        "header": 1.0,
-        "text": 0.95,
-        "list": 0.9,
-    }
-    fusion: dict[str, float] = {"alpha": 0.6, "beta": 0.2}
 
 
 class Settings(BaseModel):
@@ -120,5 +139,8 @@ if __name__ == "__main__":
         print(f"📂 启用仓库: {[v.name for v in cfg.vaults if v.enabled]}")
         print(f"🗄️ 数据库路径: {cfg.db_path}")
         print(f"🤖 模型: {cfg.embedding_model.name} (dim={cfg.embedding_model.dimensions})")
+        print(f"⚖️ 置信度: doc_type_rules={cfg.confidence.doc_type_rules}")
+        print(f"   status_rules={cfg.confidence.status_rules}")
+        print(f"   date_decay={cfg.confidence.date_decay}")
     except Exception as e:
         print(e)

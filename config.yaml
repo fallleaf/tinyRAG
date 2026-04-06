@@ -19,28 +19,39 @@ embedding_model:
   cache_dir: "./models"
   size: "small"
   dimensions: 512
-  unload_after_seconds: 120
+  unload_after_seconds: 30
 
 # 分块配置
 chunking:
   max_tokens: 512
   overlap: 50
 
-# 置信度与融合权重
+# 置信度与融合权重 (v2.0 - Frontmatter 驱动)
+# 权重计算: final_weight = doc_type_weight × status_weight × date_weight
+# 未匹配字段使用 default_weight
 confidence:
-  path_rules:
-    - pattern: "03.日记/"
-      weight: 1.2
-    - pattern: "07.项目/"
-      weight: 1.1
-    - pattern: "**"
-      weight: 1.0
-  type_rules:
-    code: 1.1
-    table: 1.05
-    header: 1.0
-    text: 0.95
-    list: 0.9
+  # Frontmatter doc_type 权重 (文档分类)
+  doc_type_rules:
+    technical: 1.2     # 技术文档
+    project: 1.15      # 项目文档
+    meeting: 1.1       # 会议记录
+    faq: 1.05          # FAQ / 复盘
+    blog: 1.0          # 日记 / 博客
+    reflection: 0.95   # 反思 / 总结
+  # Frontmatter status 权重 (任务/项目状态)
+  status_rules:
+    "进行中": 1.2
+    "已完成": 1.0
+    "待开始": 0.9
+    "已归档": 0.8
+  # 日期衰减: 越新的文档权重越高
+  date_decay:
+    enabled: true
+    half_life_days: 365    # 半衰期(天): 文档超过此天数后权重降为 0.5 × default
+    min_weight: 0.5        # 衰减下限
+  # 未匹配时的默认权重
+  default_weight: 1.0
+  # RRF 融合参数 (检索阶段使用)
   fusion:
     alpha: 0.6
     beta: 0.2

@@ -1,23 +1,25 @@
 #!/usr/bin/env python3
 """
-chunker/markdown_splitter.py - 智能 Markdown 分块器 (v2.0)
-v2.0 优化:
-1. ✅ 线程安全: 移除实例级可变状态 (chunk_counter, _current_source_path)
-2. ✅ 修正 max_chars 计算: chars_per_token 参数适配中文场景
-3. ✅ 修复代码块栅栏检测 Bug (内部栅栏行不再丢失)
-4. ✅ 新增表格块检测 (管道符分隔行 → ChunkType.TABLE)
-5. ✅ 新增列表块检测 (无序/有序列表 → ChunkType.LIST)
-6. ✅ 修正位置追踪 (相对原始文件内容, 含 frontmatter 偏移)
-7. ✅ ChunkData 改用 @dataclass, 修正类型注解
-8. ✅ 过滤空 chunk, 编译正则, 缓冲区大小 O(1) 追踪
+chunker/markdown_splitter.py - 智能 Markdown 分块器 (v3.0)
+
+v3.0 变更:
+1. ✅ 置信度改为 Frontmatter 驱动 (doc_type / status / date)
+2. ✅ 移除 path_rules (文件路径权重) 和 type_rules (内容块类型权重)
+3. ✅ 新增日期指数衰减: weight = default * 2^(-days/half_life)
+4. ✅ 线程安全: 局部变量 + 闭包，无实例级可变状态
+5. ✅ 修正 max_chars: int(max_tokens * chars_per_token)
+6. ✅ 修复代码块栅栏检测 Bug
+7. ✅ 新增表格/列表块检测
+8. ✅ @dataclass, 预编译正则，O(1) 缓冲区追踪
 """
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass, field
+from datetime import date, datetime
 from enum import Enum
-from pathlib import PurePath
 from typing import Any
 
 from loguru import logger
@@ -28,10 +30,10 @@ try:
     HAS_YAML = True
 except ImportError:
     HAS_YAML = False
-    logger.warning("⚠️ PyYAML 未安装,将使用简易 YAML 解析器 (功能受限)")
+    logger.warning("⚠️ PyYAML 未安装，将使用简易 YAML 解析器 (功能受限)")
 
 
-# ─── 预编译正则 (避免循环内重复编译) ───
+# ─── 预编译正则 ───
 _RE_HEADER = re.compile(r"^(#{1,6})\s+(.*)")
 _RE_FENCE_OPEN = re.compile(r"^(`{3,}|~{3,})\s*(\w*)")
 _RE_TABLE_ROW = re.compile(r"^\|")
@@ -40,6 +42,8 @@ _RE_FRONTMATTER = re.compile(r"^---[ \t]*\n(.*?)\n---[ \t]*(?:\n|$)", re.DOTALL)
 
 
 class ChunkType(str, Enum):
+    """分块类型枚举"""
+
     HEADER = "header"
     CODE = "code"
     TABLE = "table"
@@ -59,23 +63,26 @@ class ChunkData:
     section_path: str = "Root"
     start_pos: int = 0
     end_pos: int = 0
-    confidence_path_weight: float = 1.0
-    confidence_type_weight: float = 1.0
+    confidence_doc_type_weight: float = 1.0
+    confidence_status_weight: float = 1.0
+    confidence_date_weight: float = 1.0
     confidence_final_weight: float = 1.0
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
-        """将 list 形式的 section_path 转为 "Root / H1 / H2" 字符串"""
         if isinstance(self.section_path, list):
             self.section_path = " / ".join(["Root", *self.section_path])
         elif not self.section_path:
             self.section_path = "Root"
 
     def to_dict(self) -> dict[str, Any]:
+        """转换为字典"""
         return {k: v for k, v in self.__dict__.items()}
 
 
 class MarkdownSplitter:
+    """智能 Markdown 分块器"""
+
     def __init__(
         self,
         max_tokens: int = 512,
@@ -87,36 +94,87 @@ class MarkdownSplitter:
         Args:
             max_tokens: 嵌入模型最大 token 数
             overlap: 滑动窗口重叠字符数
-            confidence_config: 置信度配置 (path_rules / type_rules)
+            confidence_config: 置信度配置 (doc_type_rules / status_rules / date_decay)
             chars_per_token: 每个 token 对应的字符数
-                英文 ≈ 4.0, 中文 ≈ 1.5-2.0, 混合内容建议 2.0-2.5
         """
         self.max_chars = int(max_tokens * chars_per_token)
         self.overlap = overlap
 
-        # 加载置信度配置
-        self.confidence_config = confidence_config or {}
-        self._path_rules = self.confidence_config.get("path_rules", [])
-        self._type_rules = self.confidence_config.get("type_rules", {})
+        # 加载 Frontmatter 置信度配置
+        cc = confidence_config or {}
+        self._doc_type_rules: dict[str, float] = cc.get("doc_type_rules", {})
+        self._status_rules: dict[str, float] = cc.get("status_rules", {})
+        self._default_weight: float = cc.get("default_weight", 1.0)
 
-    def _calc_path_weight(self, source_path: str) -> float:
-        if not self._path_rules or not source_path:
+        date_cfg = cc.get("date_decay", {})
+        self._date_decay_enabled: bool = date_cfg.get("enabled", True)
+        self._date_half_life_days: int = date_cfg.get("half_life_days", 365)
+        self._date_min_weight: float = date_cfg.get("min_weight", 0.5)
+
+    # ─── Frontmatter 置信度计算 ───
+
+    def _calc_doc_type_weight(self, metadata: dict[str, Any]) -> float:
+        """根据 frontmatter doc_type 字段查表获取权重"""
+        if not self._doc_type_rules:
             return 1.0
-        norm_path = PurePath(source_path).as_posix()
-        for rule in self._path_rules:
-            pattern = rule.get("pattern", "")
-            if PurePath(norm_path).match(pattern):
-                return rule.get("weight", 1.0)
-        return 1.0
+        doc_type = str(metadata.get("doc_type", "")).strip().lower()
+        return self._doc_type_rules.get(doc_type, self._default_weight)
 
-    def _calc_type_weight(self, c_type: ChunkType) -> float:
-        return self._type_rules.get(c_type.value, 1.0)
+    def _calc_status_weight(self, metadata: dict[str, Any]) -> float:
+        """根据 frontmatter status 字段查表获取权重"""
+        if not self._status_rules:
+            return 1.0
+        status = str(metadata.get("status", "")).strip()
+        if not status:
+            return self._default_weight
+        return self._status_rules.get(status, self._default_weight)
+
+    def _calc_date_weight(self, metadata: dict[str, Any]) -> float:
+        """
+        根据日期计算时间衰减权重。
+        公式: weight = default * 2^(-days_old / half_life_days)
+        下限: min_weight
+        """
+        if not self._date_decay_enabled:
+            return 1.0
+
+        raw_date = metadata.get("date")
+        if not raw_date:
+            return self._default_weight
+
+        try:
+            # 兼容 date 对象、datetime 对象、字符串
+            if isinstance(raw_date, (date, datetime)):
+                doc_date = raw_date if isinstance(raw_date, date) else raw_date.date()
+            else:
+                doc_date = datetime.strptime(str(raw_date).strip()[:10], "%Y-%m-%d").date()
+        except (ValueError, TypeError):
+            return self._default_weight
+
+        days_old = (datetime.now().date() - doc_date).days
+        if days_old <= 0:
+            return self._default_weight
+
+        # 指数衰减：每过 half_life_days 天，权重减半
+        weight = self._default_weight * math.pow(2.0, -days_old / self._date_half_life_days)
+        return max(weight, self._date_min_weight)
+
+    def _calc_final_weight(self, metadata: dict[str, Any]) -> tuple[float, float, float, float]:
+        """
+        计算综合置信度权重。
+        返回: (doc_type_weight, status_weight, date_weight, final_weight)
+        """
+        dt_w = self._calc_doc_type_weight(metadata)
+        st_w = self._calc_status_weight(metadata)
+        da_w = self._calc_date_weight(metadata)
+        return dt_w, st_w, da_w, dt_w * st_w * da_w
+
+    # ─── Frontmatter 提取 ───
 
     def extract_frontmatter(self, content: str) -> tuple[str, dict[str, Any], int]:
         """
         提取 YAML Frontmatter。
-        返回: (剩余内容, 元数据字典, frontmatter 占用的字符偏移量)
-        偏移量用于修正 start_pos/end_pos 使其指向原始文件位置。
+        返回: (剩余内容，元数据字典，frontmatter 占用的字符偏移量)
         """
         if not content.startswith("---"):
             return content, {}, 0
@@ -126,8 +184,7 @@ class MarkdownSplitter:
             return content, {}, 0
 
         yaml_block = m.group(1)
-        raw_remaining = content[m.end():]
-        # 计算实际偏移: frontmatter 结束位置 + 前导空白
+        raw_remaining = content[m.end() :]
         leading_ws = len(raw_remaining) - len(raw_remaining.lstrip())
         fm_offset = m.end() + leading_ws
         remaining = raw_remaining.lstrip()
@@ -188,28 +245,34 @@ class MarkdownSplitter:
             result[current_key] = current_list
         return result
 
+    # ─── 分块核心 ───
+
     def split(
-        self, content: str, file_path: str | None = None, file_id: int = 0
+        self,
+        content: str,
+        file_path: str | None = None,
+        file_id: int = 0,
     ) -> list[ChunkData]:
         """
-        线程安全的分块方法。
-        所有可变状态均为局部变量 / 闭包捕获, 支持多线程并发调用。
+        线程安全的分块方法。所有可变状态均为局部变量 / 闭包捕获。
+        块类型识别优先级：标题 > 代码块 > 表格 > 列表 > 正文
 
-        块类型识别优先级: 标题 > 代码块 > 表格 > 列表 > 正文
+        Args:
+            content: Markdown 内容
+            file_path: 文件路径 (未使用，保留用于未来扩展)
+            file_id: 文件 ID
         """
-        # ── 局部状态 (线程安全) ──
-        source_path = file_path or ""
-        chunk_counter = [0]  # 可变计数器, 供闭包内递增
+        chunk_counter = [0]
 
         remaining_content, frontmatter, fm_offset = self.extract_frontmatter(content)
         lines = remaining_content.split("\n")
         chunks: list[ChunkData] = []
 
-        # ── 闭包: 构建单个 ChunkData ──
-        def make_chunk(text: str, c_type: ChunkType, stack: list[str],
-                       title: str, s_pos: int, e_pos: int) -> ChunkData:
-            path_w = self._calc_path_weight(source_path)
-            type_w = self._calc_type_weight(c_type)
+        # 预计算该文件的置信度权重 (同一文件所有 chunk 共享)
+        dt_w, st_w, da_w, final_w = self._calc_final_weight(frontmatter)
+
+        # ── 闭包：构建单个 ChunkData ──
+        def make_chunk(text: str, c_type: ChunkType, stack: list[str], title: str, s_pos: int, e_pos: int) -> ChunkData:
             chunk = ChunkData(
                 file_id=file_id,
                 chunk_index=chunk_counter[0],
@@ -220,16 +283,18 @@ class MarkdownSplitter:
                 start_pos=s_pos + fm_offset,
                 end_pos=e_pos + fm_offset,
                 metadata=frontmatter,
-                confidence_path_weight=path_w,
-                confidence_type_weight=type_w,
-                confidence_final_weight=path_w * type_w,
+                confidence_doc_type_weight=dt_w,
+                confidence_status_weight=st_w,
+                confidence_date_weight=da_w,
+                confidence_final_weight=final_w,
             )
             chunk_counter[0] += 1
             return chunk
 
-        # ── 闭包: 带 overlap 的分块 (含空 chunk 过滤) ──
-        def create_chunks(buf_lines: list[str], c_type: ChunkType,
-                          stack: list[str], start: int, end: int) -> list[ChunkData]:
+        # ── 闭包：带 overlap 的分块 (含空 chunk 过滤) ──
+        def create_chunks(
+            buf_lines: list[str], c_type: ChunkType, stack: list[str], start: int, end: int
+        ) -> list[ChunkData]:
             full_text = "\n".join(buf_lines)
             if not full_text.strip():
                 return []
@@ -241,14 +306,13 @@ class MarkdownSplitter:
 
             if text_len <= self.max_chars:
                 result.append(
-                    make_chunk(full_text, c_type, stack, section_title, start, start + text_len)
+                    make_chunk(full_text, c_type, stack, section_title, start, start + text_len),
                 )
                 return result
 
             while text_ptr < text_len:
                 end_ptr = min(text_ptr + self.max_chars, text_len)
                 chunk_content = full_text[text_ptr:end_ptr]
-                # 优先在换行处切分, 避免切断行
                 if end_ptr < text_len:
                     last_nl = chunk_content.rfind("\n")
                     if last_nl > self.max_chars * 0.7:
@@ -258,19 +322,16 @@ class MarkdownSplitter:
                 stripped = chunk_content.strip()
                 if stripped:
                     result.append(
-                        make_chunk(stripped, c_type, stack, section_title,
-                                   start + text_ptr, start + end_ptr)
+                        make_chunk(stripped, c_type, stack, section_title, start + text_ptr, start + end_ptr),
                     )
 
                 step = max(self.max_chars - self.overlap, 1)
                 text_ptr += step
-                # 尾部安全处理: 剩余内容 <= overlap 时合并到尾部 chunk
                 if text_len - text_ptr <= self.overlap and text_ptr < text_len:
                     tail = full_text[text_ptr:].strip()
                     if tail:
                         result.append(
-                            make_chunk(tail, c_type, stack, section_title,
-                                       start + text_ptr, start + text_len)
+                            make_chunk(tail, c_type, stack, section_title, start + text_ptr, start + text_len),
                         )
                     break
             return result
@@ -281,19 +342,18 @@ class MarkdownSplitter:
         section_stack: list[str] = []
         start_pos = 0
         current_pos = 0
-        buf_size = 0  # O(1) 缓冲区字符数追踪
-        expected_fence: str | None = None  # 期望的代码块关闭栅栏
+        buf_size = 0
+        expected_fence: str | None = None
 
         for line in lines:
-            line_len = len(line) + 1  # +1 补偿 split("\n") 丢失的换行符
+            line_len = len(line) + 1
             stripped = line.strip()
 
-            # ── 1. 标题检测 (最高优先级) ──
+            # ── 1. 标题检测 ──
             header_match = _RE_HEADER.match(line)
             if header_match:
                 if current_buffer:
-                    chunks.extend(create_chunks(current_buffer, current_type,
-                                                section_stack, start_pos, current_pos))
+                    chunks.extend(create_chunks(current_buffer, current_type, section_stack, start_pos, current_pos))
                 level = len(header_match.group(1))
                 title = header_match.group(2).strip()
                 section_stack = [*section_stack[: level - 1], title]
@@ -308,35 +368,31 @@ class MarkdownSplitter:
             fence_match = _RE_FENCE_OPEN.match(line)
             if fence_match:
                 if current_type != ChunkType.CODE:
-                    # 开启代码块
                     if current_buffer:
-                        chunks.extend(create_chunks(current_buffer, current_type,
-                                                    section_stack, start_pos, current_pos))
+                        chunks.extend(
+                            create_chunks(current_buffer, current_type, section_stack, start_pos, current_pos)
+                        )
                     fence_str = fence_match.group(1)
                     expected_fence = fence_str[0] * len(fence_str)
                     current_buffer = [line]
                     current_type = ChunkType.CODE
                     start_pos = current_pos
                     buf_size = line_len
+                elif expected_fence and stripped.startswith(expected_fence):
+                    current_buffer.append(line)
+                    buf_size += line_len
+                    chunks.extend(
+                        create_chunks(current_buffer, current_type, section_stack, start_pos, current_pos + line_len)
+                    )
+                    current_buffer = []
+                    current_type = ChunkType.TEXT
+                    start_pos = current_pos + line_len
+                    buf_size = 0
+                    expected_fence = None
                 else:
-                    # 在代码块内部: 判断是否为关闭栅栏
-                    if expected_fence and stripped.startswith(expected_fence):
-                        # 关闭代码块
-                        current_buffer.append(line)
-                        buf_size += line_len
-                        chunks.extend(create_chunks(current_buffer, current_type,
-                                                    section_stack, start_pos,
-                                                    current_pos + line_len))
-                        current_buffer = []
-                        current_type = ChunkType.TEXT
-                        start_pos = current_pos + line_len
-                        buf_size = 0
-                        expected_fence = None
-                    else:
-                        # 代码块内匹配栅栏模式但非关闭行 → 追加为内容 (不丢弃!)
-                        current_buffer.append(line)
-                        buf_size += line_len
-                current_pos += line_len
+                    current_buffer.append(line)
+                    buf_size += line_len
+                    current_pos += line_len
                 continue
 
             # ── 3. 块类型检测 (表格 / 列表) ──
@@ -347,14 +403,11 @@ class MarkdownSplitter:
             should_flush = False
             new_type: ChunkType | None = None
 
-            # TABLE/LIST 结束条件: 遇到非自身类型的非空行
-            if current_type == ChunkType.TABLE and not is_table and not is_blank:
+            if (current_type == ChunkType.TABLE and not is_table and not is_blank) or (
+                current_type == ChunkType.LIST and not is_list and not is_blank
+            ):
                 should_flush = True
                 new_type = ChunkType.TEXT
-            elif current_type == ChunkType.LIST and not is_list and not is_blank:
-                should_flush = True
-                new_type = ChunkType.TEXT
-            # TEXT/HEADER → TABLE/LIST 开始
             elif current_type in (ChunkType.TEXT, ChunkType.HEADER):
                 if is_table:
                     should_flush = bool(current_buffer)
@@ -364,8 +417,7 @@ class MarkdownSplitter:
                     new_type = ChunkType.LIST
 
             if should_flush and current_buffer:
-                chunks.extend(create_chunks(current_buffer, current_type,
-                                            section_stack, start_pos, current_pos))
+                chunks.extend(create_chunks(current_buffer, current_type, section_stack, start_pos, current_pos))
                 current_buffer = []
                 buf_size = 0
                 start_pos = current_pos
@@ -378,17 +430,14 @@ class MarkdownSplitter:
             buf_size += line_len
             current_pos += line_len
 
-            # ── 5. 超长保底切分 (不对 CODE 类型切分, 保护代码块完整性) ──
+            # ── 5. 超长保底切分 (不对 CODE 类型切分) ──
             if current_type != ChunkType.CODE and buf_size > self.max_chars * 2:
-                chunks.extend(create_chunks(current_buffer, current_type,
-                                            section_stack, start_pos, current_pos))
+                chunks.extend(create_chunks(current_buffer, current_type, section_stack, start_pos, current_pos))
                 current_buffer = []
                 buf_size = 0
                 start_pos = current_pos
 
-        # ── 处理尾部缓冲区 ──
         if current_buffer:
-            chunks.extend(create_chunks(current_buffer, current_type,
-                                        section_stack, start_pos, current_pos))
+            chunks.extend(create_chunks(current_buffer, current_type, section_stack, start_pos, current_pos))
 
         return chunks
