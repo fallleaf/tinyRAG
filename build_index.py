@@ -5,6 +5,7 @@ build_index.py - tinyRAG 高性能索引构建器
 1. ✅ 修复 vault_configs 元组访问错误 (v[0] 替代 v.name)
 2. ✅ Pydantic v2 兼容: .dict() → .model_dump()
 3. ✅ 保持语义化 vault_name 与 enabled 过滤逻辑
+4. ✅ FTS5 使用 jieba 分词写入
 """
 
 import argparse
@@ -15,6 +16,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
+import jieba
 from loguru import logger
 
 from chunker.markdown_splitter import MarkdownSplitter
@@ -29,7 +31,7 @@ setup_logger(level="INFO", log_file="logs/build_index.log")
 
 
 def prepare_fts_content(chunk, file_path: str) -> str:
-    """构建复合检索字符串，增强关键词命中率"""
+    """构建复合检索字符串，用 jieba 分词后写入 FTS5"""
     metadata = chunk.metadata or {}
     tags = metadata.get("tags", [])
     if tags is None:
@@ -52,7 +54,9 @@ def prepare_fts_content(chunk, file_path: str) -> str:
         doc_type,
         chunk.content,
     ]
-    return " ".join(filter(None, parts)).strip()
+    raw_text = " ".join(filter(None, parts)).strip()
+    # jieba 分词，用空格连接 token，与查询端保持一致
+    return " ".join(jieba.cut(raw_text))
 
 
 def json_serialize(obj):
@@ -131,6 +135,7 @@ def main():
         db.conn.execute("DELETE FROM fts5_index")
         db.conn.execute("DELETE FROM vectors")
         db.conn.execute("DELETE FROM chunks")
+        db.conn.commit()
     else:
         logger.info("🔄 模式：增量更新")
         changed_paths = [f.absolute_path for f in report.new_files + report.modified_files]

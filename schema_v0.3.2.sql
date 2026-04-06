@@ -1,5 +1,6 @@
 -- 轻量级中文 RAG 系统 - 数据库 Schema (v0.3.2)
 -- 新增：支持 Frontmatter 元数据存储和检索
+-- 修改：FTS5 改为独立表模式，支持 jieba 分词索引
 PRAGMA encoding = "UTF-8";
 PRAGMA journal_mode = WAL;
 PRAGMA busy_timeout = 5000;
@@ -45,12 +46,11 @@ CREATE INDEX IF NOT EXISTS idx_chunks_type ON chunks(content_type);
 CREATE INDEX IF NOT EXISTS idx_chunks_deleted ON chunks(is_deleted);
 CREATE INDEX IF NOT EXISTS idx_chunks_section ON chunks(section_path);
 
--- FTS5 全文索引
--- 注意：content 字段将包含 metadata 中的关键词（tags, doc_type）+ 实际内容
+-- FTS5 全文索引 (独立表模式)
+-- rowid 与 chunks.id 关联，content 存储经 jieba 分词后的加权检索文本
+-- 独立表模式支持 DELETE/INSERT，与 chunks.content 完全解耦
 CREATE VIRTUAL TABLE IF NOT EXISTS fts5_index USING fts5(
-    content,
-    content='chunks',
-    content_rowid='id'
+    content
 );
 
 -- 向量表 (sqlite-vec)
