@@ -15,6 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
+import jieba
 from loguru import logger
 
 from chunker.markdown_splitter import MarkdownSplitter
@@ -28,8 +29,15 @@ from utils.logger import setup_logger
 setup_logger(level="INFO", log_file="logs/build_index.log")
 
 
+def _jieba_segment(text: str) -> str:
+    """对中文文本进行 jieba 分词，返回空格拼接的词串"""
+    if not text or not text.strip():
+        return ""
+    return " ".join(jieba.cut_for_search(text))
+
+
 def prepare_fts_content(chunk, file_path: str) -> str:
-    """构建复合检索字符串，增强关键词命中率"""
+    """构建复合检索字符串，所有中文文本字段经 jieba 分词后写入 FTS5"""
     metadata = chunk.metadata or {}
     tags = metadata.get("tags", [])
     if tags is None:
@@ -42,15 +50,16 @@ def prepare_fts_content(chunk, file_path: str) -> str:
     filename = os.path.basename(file_path)
     section_title = chunk.section_title or ""
 
+    # 对所有含中文的文本字段做 jieba 分词，与检索端保持一致
     parts = [
-        filename,
-        filename,  # 文件名重复加权
-        chunk.section_path or "",
-        section_title,
-        section_title,
-        tag_str,
-        doc_type,
-        chunk.content,
+        _jieba_segment(filename),
+        _jieba_segment(filename),  # 文件名重复加权
+        _jieba_segment(chunk.section_path or ""),
+        _jieba_segment(section_title),
+        _jieba_segment(section_title),  # 标题重复加权
+        _jieba_segment(tag_str),
+        _jieba_segment(doc_type),
+        _jieba_segment(chunk.content),  # 正文分词
     ]
     return " ".join(filter(None, parts)).strip()
 
