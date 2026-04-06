@@ -39,7 +39,9 @@ class DatabaseManager:
             self.conn.execute("PRAGMA foreign_keys = ON")  # 启用外键级联删除
 
             # 1. 加载 Schema
-            schema_path = os.path.join(os.path.dirname(__file__), "..", "schema_v0.3.2.sql")
+            schema_path = os.path.join(
+                os.path.dirname(__file__), "..", "schema_v0.3.2.sql"
+            )
             if os.path.exists(schema_path):
                 with open(schema_path, encoding="utf-8") as f:
                     self.conn.executescript(f.read())
@@ -86,7 +88,7 @@ class DatabaseManager:
                 vault_name TEXT NOT NULL,
                 file_path TEXT NOT NULL,
                 absolute_path TEXT NOT NULL,
-                file_hash TEXT NOT NULL UNIQUE,
+                file_hash TEXT NOT NULL,
                 file_size INTEGER,
                 mtime INTEGER,
                 is_deleted INTEGER DEFAULT 0,
@@ -108,6 +110,7 @@ class DatabaseManager:
                 confidence_type_weight REAL DEFAULT 1.0,
                 confidence_final_weight REAL DEFAULT 1.0,
                 metadata TEXT,
+                confidence_json TEXT,
                 is_deleted INTEGER DEFAULT 0,
                 created_at INTEGER DEFAULT (strftime('%s', 'now')),
                 updated_at INTEGER DEFAULT (strftime('%s', 'now')),
@@ -122,12 +125,12 @@ class DatabaseManager:
         """)
         logger.info("✅ 基础表创建成功 (降级模式)")
 
-    def find_file_by_hash(self, file_hash: str, include_deleted: bool = False) -> dict | None:
+    def find_file_by_hash(
+        self, file_hash: str, include_deleted: bool = False
+    ) -> dict | None:
         """根据文件哈希查找文件记录"""
         try:
-            sql = (
-                "SELECT id, vault_name, file_path, absolute_path, file_hash, is_deleted FROM files WHERE file_hash = ?"
-            )
+            sql = "SELECT id, vault_name, file_path, absolute_path, file_hash, is_deleted FROM files WHERE file_hash = ?"
             if not include_deleted:
                 sql += " AND is_deleted = 0"
             cursor = self.conn.execute(sql, (file_hash,))
@@ -168,6 +171,59 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"❌ 插入/更新文件失败：{e}")
             return -1
+
+    def search_vectors(
+        self, query_vector: list[float], limit: int = 10
+    ) -> list[tuple[int, float]]:
+        """
+        向量近邻搜索 (sqlite-vec KNN)
+        :return: [(chunk_id, similarity_score), ...]  similarity ∈ [0, 1]
+        """
+        if not self.vec_support or not query_vector:
+            return []
+        try:
+            import array
+
+            query_blob = array.array("f", query_vector).tobytes()
+            cursor = self.conn.execute(
+                """
+                SELECT chunk_id, distance
+                FROM vectors
+                WHERE embedding MATCH ?
+                ORDER BY distance
+                LIMIT ?
+                """,
+                (query_blob, limit),
+            )
+            # vec0 返回的是 L2 距离，转换为余弦相似度近似: score = 1 / (1 + distance)
+            return [(row[0], 1.0 / (1.0 + row[1])) for row in cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"❌ 向量搜索失败: {e}")
+            return []
+
+    def search_fts(self, keywords: str, limit: int = 10) -> list[tuple[int, float]]:
+        """
+        FTS5 全文搜索 (BM25)
+        :return: [(chunk_id, bm25_score), ...]  越大越相关
+        """
+        if not keywords or not keywords.strip():
+            return []
+        try:
+            cursor = self.conn.execute(
+                """
+                SELECT rowid, rank
+                FROM fts5_index
+                WHERE fts5_index MATCH ?
+                ORDER BY rank
+                LIMIT ?
+                """,
+                (keywords, limit),
+            )
+            # FTS5 rank 为负数（绝对值越大越相关），取反使其正向
+            return [(row[0], -row[1]) for row in cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"❌ FTS5 搜索失败: {e}")
+            return []
 
     def close(self):
         """安全关闭数据库连接"""

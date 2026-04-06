@@ -36,10 +36,12 @@ class EmbeddingEngine:
 
                 if (i + self.batch_size) % 100 == 0:
                     elapsed = time.time() - start_time
-                    logger.debug(f"  已处理 {i + self.batch_size}/{len(texts)} 条 ({elapsed:.2f}s)")
+                    logger.debug(
+                        f"  已处理 {i + self.batch_size}/{len(texts)} 条 ({elapsed:.2f}s)"
+                    )
             except Exception as e:
                 # ✅ 修复：不再 continue，而是抛出异常以防止批次错位导致的数据损坏
-                logger.error(f"❌ 批次 {i//self.batch_size} 处理失败: {e}")
+                logger.error(f"❌ 批次 {i // self.batch_size} 处理失败: {e}")
                 raise RuntimeError(f"向量化批次中断: {e}") from e
 
         elapsed = time.time() - start_time

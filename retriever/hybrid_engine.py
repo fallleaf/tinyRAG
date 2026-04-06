@@ -1,31 +1,29 @@
 #!/usr/bin/env python3
 """
-retriever/hybrid_engine.py - 混合检索引擎 (RRF + 置信度加权 + 双缓存)
-修复内容:
-1. 修复 _search_internal 检索链路断裂 (P0)
-2. 修复方法缩进/作用域错误
-3. 缓存键包含 alpha/beta 权重
-4. sqlite-vec 增加 vault 过滤支持
-5. ✅ 关键词检索改用 FTS5 MATCH + jieba 分词
-6. ✅ 新增异常处理
-7. ✅ 修复 FTS5 特殊字符导致 MATCH 语法错误
+retriever/hybrid_engine.py - 混合检索引擎 (v4.0 - 动态置信度与对数平滑重构)
+
+重构说明:
+1. ✅ 动态计算: 从 chunks.confidence_json 读取原始因子，检索时实时计算得分。
+2. ✅ 对数平滑: 采用 math.log1p 处理权重因子，防止极端权重破坏检索排序。
+3. ✅ 实时衰减: 日期衰减基于检索时刻的 datetime.now() 计算。
+4. ✅ 鲁棒降级: 自动处理缺失字段，注入 blog/已完成/365天 缺省逻辑。
 """
 
-import os
+import importlib.util
+import json
+import math
 import re
-import time
+from datetime import datetime
+from typing import Any
 
 import jieba
 from loguru import logger
 
 from storage.database import DatabaseManager
 
-try:
-    from storage.cache import get_cache
-
-    CACHE_AVAILABLE = True
-except ImportError:
-    CACHE_AVAILABLE = False
+# 检查 cache 模块是否可用
+CACHE_AVAILABLE = importlib.util.find_spec("storage.cache") is not None
+if not CACHE_AVAILABLE:
     logger.warning("⚠️ Cache 模块未找到，将仅使用内存缓存")
 
 
@@ -64,228 +62,136 @@ class RetrievalResult:
         self.confidence_reason = confidence_reason
         self.file_hash = file_hash
 
-    def to_dict(self):
-        return {
-            "chunk_id": self.chunk_id,
-            "content": self.content,
-            "file_path": self.file_path,
-            "absolute_path": self.absolute_path,
-            "section": self.section,
-            "start_pos": self.start_pos,
-            "end_pos": self.end_pos,
-            "vault_name": self.vault_name,
-            "chunk_type": self.chunk_type,
-            "semantic_score": round(self.semantic_score, 4),
-            "keyword_score": round(self.keyword_score, 4),
-            "confidence_score": round(self.confidence_score, 4),
-            "final_score": round(self.final_score, 4),
-            "confidence_reason": self.confidence_reason,
-            "file_hash": self.file_hash,
-        }
 
-
-class HybridRetriever:
-    def __init__(
-        self,
-        db: DatabaseManager,
-        alpha: float = 0.6,
-        beta: float = 0.2,
-        model_name: str = "BAAI/bge-small-zh-v1.5",
-        cache_dir: str = "~/.cache/fastembed",
-        final_top_k: int = 10,
-        cache_db_path: str = "./data/cache.db",
-        cache_ttl: int = 3600,
-    ):
+class HybridEngine:
+    def __init__(self, config: Any, db: DatabaseManager, embed_engine: Any):
+        self.config = config
         self.db = db
-        self.alpha = alpha
-        self.beta = beta
-        self.k = 60  # RRF 常数
-        self.model_name = model_name
-        self.cache_dir = os.path.expanduser(cache_dir)
-        self.final_top_k = final_top_k
-        self.cache_db_path = cache_db_path
-        self.cache_ttl = cache_ttl
-        self._embedder = None
-        self._cache = None
-        self._memory_cache: dict[str, tuple[list[RetrievalResult], float]] = {}
-        self._memory_cache_ttl = 300
-
-    def _get_embedder(self):
-        if self._embedder is None:
-            from embedder.embed_engine import EmbeddingEngine
-
-            self._embedder = EmbeddingEngine(
-                model_name=self.model_name,
-                cache_dir=self.cache_dir,
-                batch_size=1,
-                unload_after_seconds=120,
-            )
-            logger.info(f"✅ 嵌入模型懒加载：{self.model_name}")
-        return self._embedder
-
-    def _get_cache(self):
-        if CACHE_AVAILABLE and self._cache is None:
-            self._cache = get_cache(db_path=self.cache_db_path, ttl_seconds=self.cache_ttl)
-        return self._cache
+        self.embed_engine = embed_engine
+        self.alpha = config.retrieval.get("alpha", 0.7)  # 向量权重
+        self.beta = config.retrieval.get("beta", 0.3)  # 关键词权重
+        self._memory_cache = {}
 
     def search(
-        self,
-        query: str,
-        mode: str = "hybrid",
-        top_k: int | None = None,
-        vaults: list[str] | None = None,
+        self, query: str, limit: int = 10, vault_filter: list[str] | None = None
     ) -> list[RetrievalResult]:
-        if top_k is None:
-            top_k = self.final_top_k
-        # ✅ 缓存键包含权重，避免配置变更导致脏缓存
-        cache_key = f"{query}|{mode}|{top_k}|{sorted(vaults or [])}|a{self.alpha}|b{self.beta}"
-
-        cache = self._get_cache()
-        if cache:
-            cached = cache.get(cache_key)
-            if cached:
-                logger.debug(f"🎯 持久化缓存命中：'{query}'")
-                return [RetrievalResult(**{k: v for k, v in item.items()}) for item in cached]
-
-        if cache_key in self._memory_cache:
-            results, ts = self._memory_cache[cache_key]
-            if time.time() - ts < self._memory_cache_ttl:
-                return results
-            del self._memory_cache[cache_key]
-
-        results = self._search_internal(query, mode, top_k, vaults)
-        if cache:
-            try:
-                cache.set(cache_key, [r.to_dict() for r in results])
-            except Exception as e:
-                logger.error(f"❌ 缓存写入失败: {e}")
-        self._memory_cache[cache_key] = (results, time.time())
-        return results
-
-    def _search_internal(self, query: str, mode: str, top_k: int, vaults: list[str] | None) -> list[RetrievalResult]:
-        # ✅ 修复 P0：实际调用检索方法
-        limit = top_k * 2
-        vec_scores = {}
-        kw_ranks = {}
-
-        if self.db.vec_support and mode in ["semantic", "hybrid"]:
-            vec_scores = self._vector_search(query, limit=limit, vaults=vaults)
-        if mode in ["keyword", "hybrid"]:
-            kw_ranks = self._keyword_search(query, limit=limit, vaults=vaults)
-
-        if not vec_scores and not kw_ranks:
+        """执行混合检索"""
+        if not query.strip():
             return []
 
-        rrf_scores = self._rrf_fusion(vec_scores, kw_ranks)
-        return self._fetch_results_with_metadata(rrf_scores, vec_scores, kw_ranks, vaults)
+        # 1. 生成查询向量
+        query_vector = self.embed_engine.embed([query])[0]
 
-    def _vector_search(self, query: str, limit: int, vaults: list[str] | None) -> dict[int, float]:
-        """向量检索 (严格遵循 sqlite-vec KNN 语法规范)"""
-        if not self.db.vec_support:
-            return {}
-        try:
-            import array
-            import sqlite3
+        # 2. 关键词预处理 (jieba 分词 + 过滤)
+        keywords = " ".join(jieba.cut_for_search(query))
+        clean_keywords = re.sub(r"[^\w\s\u4e00-\u9fa5]", " ", keywords).strip()
 
-            # 1. 生成查询向量并强制转为 SQLite BLOB
-            query_vec = self._get_embedder().embed([query])[0]
-            query_vec_bytes = sqlite3.Binary(array.array("f", query_vec).tobytes())
+        # 3. 执行检索逻辑
+        return self._search_internal(query_vector, clean_keywords, limit, vault_filter)
 
-            # 2. ✅ 修复：使用 vec0 官方 MATCH 语法，必须带 LIMIT
-            # 注意：MATCH 会自动触发向量索引扫描，distance 为 vec0 自动返回的隐藏列
-            sql = """
-            SELECT chunk_id, distance
-            FROM vectors
-            WHERE embedding MATCH ?
-            ORDER BY distance ASC
-            LIMIT ?
-            """
-            cursor = self.db.conn.execute(sql, (query_vec_bytes, limit))
-            rows = cursor.fetchall()
-
-            # 3. 距离转相似度 (L2 距离越小越相似)
-            return {row["chunk_id"]: 1.0 / (1.0 + row["distance"]) for row in rows}
-        except Exception as e:
-            logger.error(f"❌ 向量检索失败：{e}", exc_info=True)
-            return {}
-
-    def _keyword_search(self, query: str, limit: int, vaults: list[str] | None) -> dict[int, int]:
-        """基于 FTS5 全文索引的关键词检索，jieba 分词与索引时一致"""
-        try:
-            # jieba 分词，与 build_index.py 中的 prepare_fts_content 保持一致
-            # 过滤空白和 FTS5 特殊字符（单独出现的运算符会破坏 MATCH 语法）
-            FTS_SPECIAL = set('-:*()"^')
-            tokens = [t for t in jieba.cut(query)
-                      if t.strip() and not (t in FTS_SPECIAL or re.match(r'^(AND|OR|NOT|NEAR)$', t))]
-            if not tokens:
-                return {}
-
-            # FTS5 MATCH 语法：用 OR 连接多个 token
-            fts_query = " OR ".join(tokens)
-
-            sql = """
-                SELECT c.id
-                FROM fts5_index fts
-                JOIN chunks c ON c.id = fts.rowid
-                JOIN files f ON c.file_id = f.id
-                WHERE fts5_index MATCH ?
-                  AND c.is_deleted = 0
-                  AND f.is_deleted = 0
-            """
-            params: list = [fts_query]
-
-            if vaults:
-                placeholders = ", ".join(["?"] * len(vaults))
-                sql += f" AND f.vault_name IN ({placeholders})"
-                params.extend(vaults)
-
-            sql += " ORDER BY fts.rank LIMIT ?"
-            params.append(limit)
-
-            cursor = self.db.conn.execute(sql, params)
-            return {row["id"]: i + 1 for i, row in enumerate(cursor.fetchall())}
-        except Exception as e:
-            logger.error(f"❌ 关键词检索失败：{e}", exc_info=True)
-            return {}
-
-    def _rrf_fusion(self, vec_scores: dict[int, float], kw_ranks: dict[int, int]) -> dict[int, float]:
-        vec_ranks = {
-            cid: rank for rank, (cid, _) in enumerate(sorted(vec_scores.items(), key=lambda x: x[1], reverse=True), 1)
-        }
-        rrf_scores = {}
-        for cid in set(vec_ranks) | set(kw_ranks):
-            r_vec = vec_ranks.get(cid, float("inf"))
-            r_kw = kw_ranks.get(cid, float("inf"))
-            rrf_scores[cid] = (1.0 / (self.k + r_vec)) + (1.0 / (self.k + r_kw))
-        return rrf_scores
-
-    def _fetch_results_with_metadata(self, rrf_scores, vec_scores, kw_ranks, vaults):
-        chunk_ids = list(rrf_scores.keys())
-        placeholders = ", ".join(["?"] * len(chunk_ids))
-        sql = f"""
-        SELECT c.id, c.content, c.start_pos, c.end_pos, c.content_type, c.confidence_final_weight,
-               f.file_path, f.absolute_path, f.vault_name, f.file_hash, c.section_title
-        FROM chunks c JOIN files f ON c.file_id = f.id
-        WHERE c.id IN ({placeholders}) AND c.is_deleted = 0 AND f.is_deleted = 0
+    def _calculate_dynamic_confidence(self, conf_json_str: str) -> tuple[float, str]:
         """
-        cursor = self.db.conn.execute(sql, chunk_ids)
-        row_map = {row["id"]: dict(row) for row in cursor.fetchall()}
+        核心重构：实现设想中的第 5 点（对数计算可信度）
+        """
+        try:
+            data = json.loads(conf_json_str or "{}")
+        except json.JSONDecodeError:
+            data = {}
+
+        # A. 获取配置
+        conf_cfg = self.config.confidence
+
+        # B. 基础因子提取 (含缺省逻辑)
+        doc_type = data.get("doc_type", "blog")
+        status = data.get("status", "已完成")
+        final_date_str = data.get("final_date")
+
+        dt_w = conf_cfg.doc_type_rules.get(doc_type, 1.0)
+        st_w = conf_cfg.status_rules.get(status, 1.0)
+
+        # C. 实时日期衰减计算
+        date_w = 1.0
+        days_passed = 365
+        if final_date_str:
+            try:
+                final_dt = datetime.strptime(final_date_str, "%Y-%m-%d")
+                days_passed = (datetime.now() - final_dt).days
+                # 指数衰减公式: 2^(-days/half_life)
+                decay = math.pow(0.5, days_passed / conf_cfg.date_decay.half_life_days)
+                date_w = max(conf_cfg.date_decay.min_weight, decay)
+            except (ValueError, AttributeError):
+                date_w = conf_cfg.date_decay.min_weight
+
+        # D. 对数平滑融合 (关键点)
+        # 原始乘积
+        raw_factor = dt_w * st_w * date_w
+        # 对数化：使用 ln(1 + x) 保证非负且增长平滑
+        conf_score = math.log1p(raw_factor)
+
+        # E. 生成理由描述
+        reason = (
+            f"Type:{doc_type}({dt_w}) | Status:{status}({st_w}) | Age:{days_passed}d"
+        )
+
+        return conf_score, reason
+
+    def _search_internal(
+        self,
+        query_vector: Any,
+        keywords: str,
+        limit: int,
+        vault_filter: list[str] | None,
+    ) -> list[RetrievalResult]:
+        """内部检索逻辑：整合向量、FTS5 与 动态权重"""
+
+        # 1. 向量检索 (获取 ID 和向量余弦分)
+        vec_results = self.db.search_vectors(query_vector, limit=limit * 2)
+        vec_scores = {r[0]: r[1] for r in vec_results}
+
+        # 2. 关键词检索 (获取 ID 和 FTS5 BM25 分)
+        kw_results = self.db.search_fts(keywords, limit=limit * 2)
+        kw_scores = {r[0]: r[1] for r in kw_results}
+
+        # 合并所有候选 ID
+        candidate_ids = list(set(vec_scores.keys()) | set(kw_scores.keys()))
+        if not candidate_ids:
+            return []
+
+        # 3. 从数据库拉取详细信息 (包括新增的 confidence_json)
+        placeholders = ",".join(["?"] * len(candidate_ids))
+        query_sql = f"""
+            SELECT c.*, f.file_path, f.absolute_path, f.vault_name, f.file_hash
+            FROM chunks c
+            JOIN files f ON c.file_id = f.id
+            WHERE c.id IN ({placeholders}) AND c.is_deleted = 0
+        """
+
+        rows = self.db.conn.execute(query_sql, candidate_ids).fetchall()
 
         final_results = []
-        for cid, rrf_score in sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True):
-            row = row_map.get(cid)
-            if not row:
-                continue
-            if vaults and row["vault_name"] not in vaults:
-                continue
+        for row in rows:
+            cid = row["id"]
 
-            conf_w = row["confidence_final_weight"]
-            final_score = rrf_score * conf_w
-            kw_score = 1.0 / (self.k + kw_ranks[cid]) if cid in kw_ranks else 0.0
+            # --- 动态计算置信度 ---
+            conf_score, conf_reason = self._calculate_dynamic_confidence(
+                row["confidence_json"]
+            )
+
+            # --- 分值融合公式 ---
+            # 向量分 (0-1 之间)
+            v_score = vec_scores.get(cid, 0.0) * self.alpha
+
+            # 关键词分 (FTS5 分数可能很大，同样采用对数平滑对齐量级)
+            raw_kw = kw_scores.get(cid, 0.0)
+            k_score = math.log1p(max(0, raw_kw)) * self.beta
+
+            # 最终加权
+            # (基础得分) * 动态置信度系数
+            final_score = (v_score + k_score) * conf_score
 
             final_results.append(
                 RetrievalResult(
-                    chunk_id=row["id"],
+                    chunk_id=cid,
                     content=row["content"],
                     file_path=row["file_path"],
                     absolute_path=row["absolute_path"],
@@ -294,31 +200,15 @@ class HybridRetriever:
                     end_pos=row["end_pos"],
                     vault_name=row["vault_name"],
                     chunk_type=row["content_type"],
-                    semantic_score=vec_scores.get(cid, 0.0),
-                    keyword_score=kw_score,
-                    confidence_score=conf_w,
+                    semantic_score=v_score,
+                    keyword_score=k_score,
+                    confidence_score=conf_score,
                     final_score=final_score,
-                    confidence_reason=self._generate_reason(row["file_path"], row["content_type"], conf_w),
+                    confidence_reason=conf_reason,
                     file_hash=row["file_hash"],
                 )
             )
-        return final_results
 
-    def _generate_reason(self, file_path: str, content_type: str, weight: float) -> str:
-        reasons = []
-        if "official" in file_path.lower():
-            reasons.append("官方文档")
-        elif "draft" in file_path.lower():
-            reasons.append("草稿")
-        reasons.append(f"类型：{content_type} (权重：{weight:.2f})")
-        return " | ".join(reasons)
-
-    def clear_cache(self):
-        cache = self._get_cache()
-        if cache:
-            cache.clear()
-        self._memory_cache.clear()
-        logger.info("🧹 检索缓存已清除")
-
-
-__all__ = ["HybridRetriever", "RetrievalResult"]
+        # 4. 排序并截断
+        final_results.sort(key=lambda x: x.final_score, reverse=True)
+        return final_results[:limit]

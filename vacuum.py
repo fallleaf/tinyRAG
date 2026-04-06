@@ -125,9 +125,15 @@ def execute_vacuum(db: DatabaseManager, dry_run: bool = False) -> bool:
 
 def main():
     parser = argparse.ArgumentParser(description="RAG 数据库 VACUUM 工具")
-    parser.add_argument("--dry-run", action="store_true", help="仅检查，不执行清理和 VACUUM")
-    parser.add_argument("--clean-only", action="store_true", help="仅清理软删除记录，不执行 VACUUM")
-    parser.add_argument("--vacuum-only", action="store_true", help="仅执行 VACUUM，不清理记录")
+    parser.add_argument(
+        "--dry-run", action="store_true", help="仅检查，不执行清理和 VACUUM"
+    )
+    parser.add_argument(
+        "--clean-only", action="store_true", help="仅清理软删除记录，不执行 VACUUM"
+    )
+    parser.add_argument(
+        "--vacuum-only", action="store_true", help="仅执行 VACUUM，不清理记录"
+    )
     parser.add_argument("--force", action="store_true", help="即使软删除比例低也执行")
     args = parser.parse_args()
 
@@ -155,13 +161,17 @@ def main():
     if stats["max_ratio"] > 20 or args.force:
         if args.dry_run:
             logger.info("💡 建议执行清理和 VACUUM (软删除比例 > 20%)")
-            logger.info(f" 预计清理：{stats['chunks_deleted']} chunks + {stats['files_deleted']} files")
+            logger.info(
+                f" 预计清理：{stats['chunks_deleted']} chunks + {stats['files_deleted']} files"
+            )
         else:
             # 1. 先清理软删除记录
             if not args.vacuum_only:
                 logger.info("\n🧹 步骤 1: 清理软删除记录...")
                 clean_stats = clean_deleted_records(db, dry_run=False)
-                logger.info(f" 共删除 {clean_stats['chunks_deleted'] + clean_stats['files_deleted']} 条记录")
+                logger.info(
+                    f" 共删除 {clean_stats['chunks_deleted'] + clean_stats['files_deleted']} 条记录"
+                )
 
             # 2. 执行 VACUUM
             if not args.clean_only:
@@ -171,7 +181,9 @@ def main():
                     new_stats = check_vacuum_needed(db)
 
                     # 检查文件大小变化
-                    new_size = os.path.getsize(os.path.join(script_dir, "data", "rag.db")) / (1024 * 1024)
+                    new_size = os.path.getsize(
+                        os.path.join(script_dir, "data", "rag.db")
+                    ) / (1024 * 1024)
                     saved = stats["file_size_mb"] - new_size
                     if saved > 0:
                         logger.success(
@@ -180,7 +192,9 @@ def main():
                     else:
                         logger.info(f"ℹ️ 文件大小变化：{new_size:.2f} MB")
 
-                    logger.info(f" 清理后 chunks 软删除比例：{new_stats['chunks_ratio']:.1f}%")
+                    logger.info(
+                        f" 清理后 chunks 软删除比例：{new_stats['chunks_ratio']:.1f}%"
+                    )
                 else:
                     sys.exit(1)
             else:

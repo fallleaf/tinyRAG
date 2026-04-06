@@ -1,7 +1,6 @@
--- 轻量级中文 RAG 系统 - 数据库 Schema (v0.3.3)
+-- 轻量级中文 RAG 系统 - 数据库 Schema (v0.3.2)
 -- 新增：支持 Frontmatter 元数据存储和检索
 -- 修改：FTS5 改为独立表模式，支持 jieba 分词索引
--- 修改(B7)：file_hash 移除 UNIQUE 约束，允许跨 vault 同内容文件
 PRAGMA encoding = "UTF-8";
 PRAGMA journal_mode = WAL;
 PRAGMA busy_timeout = 5000;
@@ -11,7 +10,7 @@ CREATE TABLE IF NOT EXISTS files (
     vault_name TEXT NOT NULL,
     file_path TEXT NOT NULL,
     absolute_path TEXT NOT NULL,
-    file_hash TEXT NOT NULL,
+    file_hash TEXT NOT NULL UNIQUE,
     file_size INTEGER,
     mtime INTEGER,
     is_deleted INTEGER DEFAULT 0,
@@ -68,7 +67,7 @@ CREATE TABLE IF NOT EXISTS index_metadata (
     updated_at INTEGER DEFAULT (strftime('%s', 'now'))
 );
 
-INSERT OR IGNORE INTO index_metadata (key, value) VALUES ('schema_version', '0.3.3');
+INSERT OR IGNORE INTO index_metadata (key, value) VALUES ('schema_version', '0.3.2');
 INSERT OR IGNORE INTO index_metadata (key, value) VALUES ('index_status', 'valid');
 INSERT OR IGNORE INTO index_metadata (key, value) VALUES ('encoding', 'UTF-8');
 INSERT OR IGNORE INTO index_metadata (key, value) VALUES ('vec_support', 'true');

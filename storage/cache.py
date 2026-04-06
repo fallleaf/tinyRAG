@@ -6,6 +6,7 @@ storage/cache.py - 持久化查询缓存 (原子 LRU + TTL)
 
 import json
 import os
+import random
 import sqlite3
 import threading
 import time
@@ -38,9 +39,13 @@ class QueryCache:
                 created_at REAL NOT NULL, last_accessed REAL NOT NULL, hit_count INTEGER DEFAULT 1
             )
         """)
-        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_last_accessed ON query_cache(last_accessed)")
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_last_accessed ON query_cache(last_accessed)"
+        )
         self._conn.commit()
-        logger.info(f"✅ 查询缓存初始化：{self.db_path} (TTL={self.ttl_seconds}s, Max={self.max_entries})")
+        logger.info(
+            f"✅ 查询缓存初始化：{self.db_path} (TTL={self.ttl_seconds}s, Max={self.max_entries})"
+        )
 
     def get(self, cache_key: str) -> Any | None:
         with self._lock:
@@ -55,7 +60,9 @@ class QueryCache:
                 return None
 
             if time.time() - row["created_at"] > self.ttl_seconds:
-                self._conn.execute("DELETE FROM query_cache WHERE cache_key = ?", (cache_key,))
+                self._conn.execute(
+                    "DELETE FROM query_cache WHERE cache_key = ?", (cache_key,)
+                )
                 self._conn.commit()
                 return None
 
@@ -65,8 +72,8 @@ class QueryCache:
             )
             self._conn.commit()
 
-            # ✅ 概率性清理过期数据 (10% 触发)
-            if time.time() % 10 < 1:
+            # ✅ 概率性清理过期数据 (~10% 触发，基于随机数避免时间戳聚集)
+            if random.random() < 0.1:
                 self.cleanup_expired()
 
             try:
@@ -111,7 +118,9 @@ class QueryCache:
         with self._lock:
             if not self._conn:
                 return False
-            self._conn.execute("DELETE FROM query_cache WHERE cache_key = ?", (cache_key,))
+            self._conn.execute(
+                "DELETE FROM query_cache WHERE cache_key = ?", (cache_key,)
+            )
             self._conn.commit()
             return True
 
@@ -130,7 +139,9 @@ class QueryCache:
             if not self._conn:
                 return 0
             cutoff = time.time() - self.ttl_seconds
-            self._conn.execute("DELETE FROM query_cache WHERE created_at < ?", (cutoff,))
+            self._conn.execute(
+                "DELETE FROM query_cache WHERE created_at < ?", (cutoff,)
+            )
             count = self._conn.total_changes
             self._conn.commit()
             if count:
@@ -146,7 +157,9 @@ class QueryCache:
 _cache_instance: QueryCache | None = None
 
 
-def get_cache(db_path: str = "./data/cache.db", ttl_seconds: int = 3600, max_entries: int = 1000) -> QueryCache:
+def get_cache(
+    db_path: str = "./data/cache.db", ttl_seconds: int = 3600, max_entries: int = 1000
+) -> QueryCache:
     global _cache_instance
     if _cache_instance is None:
         _cache_instance = QueryCache(db_path, ttl_seconds, max_entries)

@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 """
-mcp_server/server.py - Production MCP RAG Server (v2.0)
+mcp_server/server.py - Production MCP RAG Server (v2.1)
+
+v2.1 修复内容:
+- S1: HybridRetriever → HybridEngine 类名修复
+- S2: HybridEngine 构造函数签名对齐 (config, db, embed_engine)
+- S3: MarkdownSplitter 构造函数签名对齐 (config 对象)
+- S4: SearchTool.search() 调用参数对齐 (query, limit, vault_filter)
 
 v2.0 优化内容:
 1.  P0-1: MarkdownSplitter 传递 confidence_config (frontmatter 权重)
@@ -40,7 +46,8 @@ except ImportError:
 
 from chunker.markdown_splitter import MarkdownSplitter
 from config import Settings, load_config
-from retriever.hybrid_engine import HybridRetriever
+from embedder.embed_engine import EmbeddingEngine
+from retriever.hybrid_engine import HybridEngine
 from scanner.scan_engine import Scanner
 from storage.database import DatabaseManager
 
@@ -88,7 +95,7 @@ class AppContext:
         self.config: Settings | None = None
         self.db: DatabaseManager | None = None
         self.scanner: Scanner | None = None
-        self.retriever: HybridRetriever | None = None
+        self.retriever: HybridEngine | None = None
         self.splitter: MarkdownSplitter | None = None
         self._initialized = False
         self._lock = asyncio.Lock()
@@ -115,20 +122,21 @@ class AppContext:
             db = DatabaseManager(config.db_path)
             scanner = Scanner(db)
 
-            retriever = HybridRetriever(
-                db=db,
-                alpha=config.confidence.fusion["alpha"],
-                beta=config.confidence.fusion["beta"],
+            embed_engine = EmbeddingEngine(
                 model_name=config.embedding_model.name,
                 cache_dir=config.embedding_model.cache_dir,
+                batch_size=32,
+                unload_after_seconds=config.embedding_model.unload_after_seconds,
             )
 
-            # P0-1: 传递 confidence_config，使 frontmatter 权重系统生效
-            splitter = MarkdownSplitter(
-                max_tokens=config.chunking["max_tokens"],
-                overlap=config.chunking["overlap"],
-                confidence_config=config.confidence.model_dump(),
+            retriever = HybridEngine(
+                config=config,
+                db=db,
+                embed_engine=embed_engine,
             )
+
+            # P0-1: 传递完整 config 对象，使分块器与置信度系统生效
+            splitter = MarkdownSplitter(config)
 
             # 全部成功，赋值到 self
             self.config = config
@@ -217,7 +225,9 @@ class BaseTool:
         raise NotImplementedError
 
     def to_mcp_tool(self) -> Tool:
-        return Tool(name=self.name, description=self.description, inputSchema=self.schema)
+        return Tool(
+            name=self.name, description=self.description, inputSchema=self.schema
+        )
 
 
 class SearchTool(BaseTool):
@@ -243,7 +253,15 @@ class SearchTool(BaseTool):
         mode = args.get("mode", "hybrid")
         top_k = min(max(args.get("top_k", 10), 1), 100)
 
-        results = await asyncio.to_thread(self.ctx.retriever.search, query, mode=mode, top_k=top_k)
+        # 通过 alpha/beta 比值模拟检索模式
+        if mode == "keyword":
+            self.ctx.config.retrieval["alpha"] = 0.0
+            self.ctx.config.retrieval["beta"] = 1.0
+        elif mode == "semantic":
+            self.ctx.config.retrieval["alpha"] = 1.0
+            self.ctx.config.retrieval["beta"] = 0.0
+
+        results = await asyncio.to_thread(self.ctx.retriever.search, query, limit=top_k)
         return {
             "query": query,
             "total": len(results),
@@ -254,6 +272,7 @@ class SearchTool(BaseTool):
                     "abs_path": r.absolute_path,
                     "content": r.content[:300],
                     "score": round(r.final_score, 4),
+                    "confidence": round(r.confidence_score, 4),
                 }
                 for i, r in enumerate(results)
             ],
@@ -261,7 +280,10 @@ class SearchTool(BaseTool):
 
 
 class ScanTool(BaseTool):
-    name, description = "scan_index", "Incrementally scan and update file index (tinyRAG)"
+    name, description = (
+        "scan_index",
+        "Incrementally scan and update file index (tinyRAG)",
+    )
     schema: ClassVar[dict] = {"type": "object", "properties": {}}
 
     # P2-3: 补充参数类型注解
@@ -347,7 +369,11 @@ class ToolRegistry:
             raise ValueError(f"Unknown tool: {name}")
         result = await self.tools[name].run(args)
         # P2-4: 添加 default=str 兜底 + 移除 indent (机器通信不需要格式化)
-        return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False, default=str))]
+        return [
+            TextContent(
+                type="text", text=json.dumps(result, ensure_ascii=False, default=str)
+            )
+        ]
 
 
 class RagServer:

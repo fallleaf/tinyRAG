@@ -5,7 +5,6 @@ build_index.py - tinyRAG 高性能索引构建器
 1. ✅ 修复 vault_configs 元组访问错误 (v[0] 替代 v.name)
 2. ✅ Pydantic v2 兼容: .dict() → .model_dump()
 3. ✅ 保持语义化 vault_name 与 enabled 过滤逻辑
-4. ✅ FTS5 使用 jieba 分词写入
 """
 
 import argparse
@@ -16,7 +15,6 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
-import jieba
 from loguru import logger
 
 from chunker.markdown_splitter import MarkdownSplitter
@@ -31,7 +29,7 @@ setup_logger(level="INFO", log_file="logs/build_index.log")
 
 
 def prepare_fts_content(chunk, file_path: str) -> str:
-    """构建复合检索字符串，用 jieba 分词后写入 FTS5"""
+    """构建复合检索字符串，增强关键词命中率"""
     metadata = chunk.metadata or {}
     tags = metadata.get("tags", [])
     if tags is None:
@@ -54,9 +52,7 @@ def prepare_fts_content(chunk, file_path: str) -> str:
         doc_type,
         chunk.content,
     ]
-    raw_text = " ".join(filter(None, parts)).strip()
-    # jieba 分词，用空格连接 token，与查询端保持一致
-    return " ".join(jieba.cut(raw_text))
+    return " ".join(filter(None, parts)).strip()
 
 
 def json_serialize(obj):
@@ -68,12 +64,14 @@ def json_serialize(obj):
     raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
 
-def process_file_worker(file_item: dict, splitter: MarkdownSplitter) -> tuple[int, list[Any], str]:
+def process_file_worker(
+    file_item: dict, splitter: MarkdownSplitter
+) -> tuple[int, list[Any], str]:
     """并行分块任务单元"""
     abs_path = Path(file_item["absolute_path"])
     try:
         content = abs_path.read_text(encoding="utf-8")
-        chunks = splitter.split(content, file_item["file_path"])
+        chunks = splitter.split(content, file_item.get("mtime"))
         return file_item["id"], chunks, file_item["file_path"]
     except Exception as e:
         logger.error(f"❌ 读取/分块失败：{abs_path} - {e}")
@@ -96,12 +94,8 @@ def main():
     db = DatabaseManager(config.db_path)
     scanner = Scanner(db)
 
-    # ✅ 修复：Pydantic v2 使用 model_dump()
-    splitter = MarkdownSplitter(
-        max_tokens=config.chunking["max_tokens"],
-        overlap=config.chunking["overlap"],
-        confidence_config=config.confidence.model_dump(),
-    )
+    # ✅ 修复 B5：MarkdownSplitter 构造函数接收完整 config 对象
+    splitter = MarkdownSplitter(config)
 
     embedder = EmbeddingEngine(
         model_name=config.embedding_model.name,
@@ -130,27 +124,30 @@ def main():
     files_to_index = []
     if args.force:
         logger.info("🔄 模式：强制重建所有索引")
-        cursor = db.conn.execute("SELECT id, absolute_path, file_path FROM files WHERE is_deleted = 0")
+        cursor = db.conn.execute(
+            "SELECT id, absolute_path, file_path, mtime FROM files WHERE is_deleted = 0"
+        )
         files_to_index = [dict(row) for row in cursor.fetchall()]
         db.conn.execute("DELETE FROM fts5_index")
         db.conn.execute("DELETE FROM vectors")
         db.conn.execute("DELETE FROM chunks")
-        db.conn.commit()
     else:
         logger.info("🔄 模式：增量更新")
-        changed_paths = [f.absolute_path for f in report.new_files + report.modified_files]
+        changed_paths = [
+            f.absolute_path for f in report.new_files + report.modified_files
+        ]
 
         if changed_paths:
             placeholders = ",".join(["?"] * len(changed_paths))
             cursor = db.conn.execute(
-                f"SELECT id, absolute_path, file_path FROM files WHERE absolute_path IN ({placeholders})",
+                f"SELECT id, absolute_path, file_path, mtime FROM files WHERE absolute_path IN ({placeholders})",
                 changed_paths,
             )
             files_to_index = [dict(row) for row in cursor.fetchall()]
 
         # 检查缺失 chunks 的文件
         cursor = db.conn.execute("""
-            SELECT f.id, f.absolute_path, f.file_path
+            SELECT f.id, f.absolute_path, f.file_path, f.mtime
             FROM files f
             WHERE f.is_deleted = 0
             AND NOT EXISTS (SELECT 1 FROM chunks c WHERE c.file_id = f.id)
@@ -158,7 +155,9 @@ def main():
         """)
         missing_chunks_files = [dict(row) for row in cursor.fetchall()]
         if missing_chunks_files:
-            logger.info(f"⚠️ 发现 {len(missing_chunks_files)} 个文件缺少 chunks，补充索引中...")
+            logger.info(
+                f"⚠️ 发现 {len(missing_chunks_files)} 个文件缺少 chunks，补充索引中..."
+            )
             files_to_index.extend(missing_chunks_files)
 
     if not files_to_index:
@@ -170,14 +169,18 @@ def main():
     all_pending_chunks = []
 
     with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
-        results = executor.map(lambda f: process_file_worker(f, splitter), files_to_index)
+        results = executor.map(
+            lambda f: process_file_worker(f, splitter), files_to_index
+        )
         for f_id, chunks, f_path in results:
             for c in chunks:
                 all_pending_chunks.append((f_id, c, f_path))
 
     # 5. 分批向量化与入库
     total_chunks = len(all_pending_chunks)
-    logger.info(f"🧩 待向量化块总数：{total_chunks}，采用 Batch Size: {args.batch_size}")
+    logger.info(
+        f"🧩 待向量化块总数：{total_chunks}，采用 Batch Size: {args.batch_size}"
+    )
 
     try:
         from tqdm import tqdm
@@ -200,30 +203,46 @@ def main():
             continue
 
         try:
-            for idx, ((file_id, chunk, f_path), emb) in enumerate(zip(batch, embeddings)):
+            for idx, ((file_id, chunk, f_path), emb) in enumerate(
+                zip(batch, embeddings)
+            ):
                 try:
-                    metadata_json = json.dumps(chunk.metadata or {}, ensure_ascii=False, default=json_serialize)
+                    metadata_json = json.dumps(
+                        chunk.metadata or {}, ensure_ascii=False, default=json_serialize
+                    )
                 except Exception as e:
                     logger.warning(f"⚠️ metadata 序列化失败，使用空对象：{e}")
                     metadata_json = "{}"
 
+                # 序列化置信度原始因子 (供检索期动态计算)
+                try:
+                    confidence_json = json.dumps(
+                        chunk.confidence_metadata or {},
+                        ensure_ascii=False,
+                        default=json_serialize,
+                    )
+                except Exception as e:
+                    logger.warning(f"⚠️ confidence_metadata 序列化失败，使用空对象：{e}")
+                    confidence_json = "{}"
+
                 cursor = db.conn.execute(
                     """
                     INSERT INTO chunks (file_id, chunk_index, content, content_type, section_title, section_path,
-                    start_pos, end_pos, confidence_final_weight, metadata)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    start_pos, end_pos, confidence_final_weight, metadata, confidence_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         file_id,
-                        chunk.chunk_index,
+                        idx,
                         chunk.content,
                         chunk.content_type.value,
                         chunk.section_title,
                         chunk.section_path,
                         chunk.start_pos,
                         chunk.end_pos,
-                        chunk.confidence_final_weight,
+                        1.0,  # 占位值，实际权重由检索期动态计算
                         metadata_json,
+                        confidence_json,
                     ),
                 )
                 new_chunk_id = cursor.lastrowid

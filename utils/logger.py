@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# utils/logger.py
+# utils/logger.py - 懒加载日志工具
 import sys
 
 
@@ -34,5 +34,30 @@ def setup_logger(level: str = "INFO", log_file: str = "logs/app.log"):
     return loguru_logger
 
 
-# 全局日志实例
-logger = setup_logger()
+# ── 懒加载代理：避免模块导入时立即创建日志文件和目录 ──
+_logger_instance = None
+
+
+def _get_logger():
+    """延迟初始化日志实例，首次使用时才创建"""
+    global _logger_instance
+    if _logger_instance is None:
+        _logger_instance = setup_logger()
+    return _logger_instance
+
+
+class _LazyLogger:
+    """代理类：将所有属性访问转发到延迟初始化的 logger 实例"""
+
+    def __getattr__(self, name):
+        return getattr(_get_logger(), name)
+
+    def __setattr__(self, name, value):
+        if name == "_initialized":
+            super().__setattr__(name, value)
+        else:
+            setattr(_get_logger(), name, value)
+
+
+# 模块级日志实例 (导入时不创建文件，首次调用 logger.info() 等时才初始化)
+logger = _LazyLogger()
