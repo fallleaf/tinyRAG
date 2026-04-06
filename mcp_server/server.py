@@ -147,7 +147,7 @@ class BaseTool:
 
 
 class SearchTool(BaseTool):
-    name, description = "search", "Hybrid knowledge retrieval with RRF fusion"
+    name, description = "search", "Hybrid knowledge retrieval with RRF fusion (tinyRAG)"
     schema: ClassVar[dict] = {
         "type": "object",
         "properties": {
@@ -187,12 +187,13 @@ class SearchTool(BaseTool):
 
 
 class ScanTool(BaseTool):
-    name, description = "scan_index", "Incrementally scan and update file index"
+    name, description = "scan_index", "Incrementally scan and update file index (tinyRAG)"
     schema: ClassVar[dict] = {"type": "object", "properties": {}}
 
     async def run(self, args):
         await self.ctx.initialize()
-        vault_configs = [(f"v_{i}", p) for i, p in enumerate(self.ctx.config.vaults)] if self.ctx.config else []
+        # 修复：提取 VaultConfig 的 path 属性，而不是传递整个对象
+        vault_configs = [(f"v_{i}", p.path) for i, p in enumerate(self.ctx.config.vaults)] if self.ctx.config else []
         report = await asyncio.to_thread(self.ctx.scanner.scan_vaults, vault_configs)
         await asyncio.to_thread(self.ctx.scanner.process_report, report)
         return {
@@ -205,7 +206,7 @@ class ScanTool(BaseTool):
 
 
 class RebuildTool(BaseTool):
-    name, description = "rebuild_index", "Force rebuild full knowledge index"
+    name, description = "rebuild_index", "Force rebuild full knowledge index (tinyRAG)"
     schema: ClassVar[dict] = {"type": "object", "properties": {}}
 
     async def run(self, args):
@@ -256,12 +257,14 @@ class RagServer:
     def __init__(self):
         self.ctx = AppContext()
         self.registry = ToolRegistry(self.ctx)
+        # 注册工具，名称已更新为 tinyRAG 风格
         self.registry.register(SearchTool)
         self.registry.register(ScanTool)
         self.registry.register(RebuildTool)
 
         if MCP_AVAILABLE:
-            self.server = Server("rag-system")
+            # 服务器名称改为 tinyRAG
+            self.server = Server("tinyRAG")
             self._register()
         else:
             logger.warning("⚠️ MCP 未安装，运行在 Mock 模式")
