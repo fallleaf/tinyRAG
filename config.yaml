@@ -19,7 +19,7 @@ embedding_model:
   cache_dir: "./models"
   size: "small"
   dimensions: 512
-  unload_after_seconds: 30
+  unload_after_seconds: 120
 
 # 分块配置
 chunking:
