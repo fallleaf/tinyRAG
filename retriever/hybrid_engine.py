@@ -9,6 +9,7 @@ retriever/hybrid_engine.py - 混合检索引擎 (v4.0 - 动态置信度与对数
 4. ✅ 鲁棒降级: 自动处理缺失字段，注入 blog/已完成/365天 缺省逻辑。
 """
 
+import hashlib
 import importlib.util
 import json
 import math
@@ -22,9 +23,17 @@ from loguru import logger
 from storage.database import DatabaseManager
 
 # 检查 cache 模块是否可用
-CACHE_AVAILABLE = importlib.util.find_spec("storage.cache") is not None
-if not CACHE_AVAILABLE:
-    logger.warning("⚠️ Cache 模块未找到，将仅使用内存缓存")
+_cache_spec = importlib.util.find_spec("storage.cache")
+if _cache_spec:
+    try:
+        from storage.cache import get_cache
+
+        CACHE_AVAILABLE = True
+    except ImportError:
+        CACHE_AVAILABLE = False
+        logger.warning("⚠️ Cache 模块导入失败，将仅使用内存缓存")
+else:
+    CACHE_AVAILABLE = False
 
 
 class RetrievalResult:
@@ -70,14 +79,117 @@ class HybridEngine:
         self.embed_engine = embed_engine
         self.alpha = config.retrieval.get("alpha", 0.7)  # 向量权重
         self.beta = config.retrieval.get("beta", 0.3)  # 关键词权重
-        self._memory_cache = {}
+
+        # 缓存初始化：优先使用持久化 QueryCache，降级为内存字典
+        self._memory_cache: dict[str, list[dict]] = {}
+        self._cache = None
+        if CACHE_AVAILABLE:
+            try:
+                cache_cfg = config.cache if hasattr(config, "cache") else None
+                if cache_cfg:
+                    self._cache = get_cache(
+                        db_path=getattr(cache_cfg, "db_path", "./data/cache.db"),
+                        ttl_seconds=getattr(cache_cfg, "ttl_seconds", 3600),
+                        max_entries=getattr(cache_cfg, "max_entries", 1000),
+                    )
+                    logger.info("✅ 持久化缓存已启用")
+                else:
+                    logger.info("ℹ️ 未配置 cache，使用内存缓存")
+            except Exception as e:
+                logger.warning(f"⚠️ 持久化缓存初始化失败，降级为内存缓存: {e}")
+
+    # ─── 缓存键生成 ───
+    def _make_cache_key(
+        self, query: str, limit: int, vault_filter: list[str] | None
+    ) -> str:
+        """基于查询内容 + 参数生成确定性缓存键"""
+        raw = f"{query}|{limit}"
+        if vault_filter:
+            raw += f"|{','.join(sorted(vault_filter))}"
+        # alpha/beta 可能被 server.py 动态修改，也纳入缓存键
+        raw += f"|a={self.alpha:.2f}|b={self.beta:.2f}"
+        return hashlib.md5(raw.encode()).hexdigest()
+
+    # ─── 序列化 / 反序列化 ───
+    @staticmethod
+    def _serialize_results(results: list[RetrievalResult]) -> list[dict]:
+        return [
+            {
+                "chunk_id": r.chunk_id,
+                "content": r.content,
+                "file_path": r.file_path,
+                "absolute_path": r.absolute_path,
+                "section": r.section,
+                "start_pos": r.start_pos,
+                "end_pos": r.end_pos,
+                "vault_name": r.vault_name,
+                "chunk_type": r.chunk_type,
+                "semantic_score": r.semantic_score,
+                "keyword_score": r.keyword_score,
+                "confidence_score": r.confidence_score,
+                "final_score": r.final_score,
+                "confidence_reason": r.confidence_reason,
+                "file_hash": r.file_hash,
+            }
+            for r in results
+        ]
+
+    @staticmethod
+    def _deserialize_results(data: list[dict]) -> list[RetrievalResult]:
+        return [RetrievalResult(**item) for item in data]
+
+    # ─── 缓存读写 ───
+    def _cache_get(self, cache_key: str) -> list[RetrievalResult] | None:
+        """读取缓存，优先持久化，降级内存"""
+        # 1) 持久化缓存
+        if self._cache is not None:
+            try:
+                cached = self._cache.get(cache_key)
+                if cached is not None:
+                    logger.debug("Cache HIT (persistent)")
+                    return self._deserialize_results(cached)
+            except Exception as e:
+                logger.warning(f"持久化缓存读取失败: {e}")
+
+        # 2) 内存缓存
+        cached = self._memory_cache.get(cache_key)
+        if cached is not None:
+            logger.debug("Cache HIT (memory)")
+            return self._deserialize_results(cached)
+
+        return None
+
+    def _cache_set(self, cache_key: str, results: list[RetrievalResult]) -> None:
+        """写入缓存，双层同步"""
+        serialized = self._serialize_results(results)
+        # 内存缓存始终写入
+        self._memory_cache[cache_key] = serialized
+        # 内存缓存 LRU 淘汰：超过 500 条时清理最旧的一半
+        if len(self._memory_cache) > 500:
+            keys = list(self._memory_cache.keys())
+            for k in keys[: len(keys) // 2]:
+                del self._memory_cache[k]
+            logger.debug(f"Memory cache pruned to {len(self._memory_cache)} entries")
+
+        # 持久化缓存
+        if self._cache is not None:
+            try:
+                self._cache.set(cache_key, serialized)
+            except Exception as e:
+                logger.warning(f"持久化缓存写入失败: {e}")
 
     def search(
         self, query: str, limit: int = 10, vault_filter: list[str] | None = None
     ) -> list[RetrievalResult]:
-        """执行混合检索"""
+        """执行混合检索（带缓存）"""
         if not query.strip():
             return []
+
+        # 0. 缓存查询
+        cache_key = self._make_cache_key(query, limit, vault_filter)
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            return cached
 
         # 1. 生成查询向量
         query_vector = self.embed_engine.embed([query])[0]
@@ -87,7 +199,14 @@ class HybridEngine:
         clean_keywords = re.sub(r"[^\w\s\u4e00-\u9fa5]", " ", keywords).strip()
 
         # 3. 执行检索逻辑
-        return self._search_internal(query_vector, clean_keywords, limit, vault_filter)
+        results = self._search_internal(
+            query_vector, clean_keywords, limit, vault_filter
+        )
+
+        # 4. 写入缓存
+        self._cache_set(cache_key, results)
+
+        return results
 
     def _calculate_dynamic_confidence(self, conf_json_str: str) -> tuple[float, str]:
         """

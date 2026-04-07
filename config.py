@@ -57,6 +57,19 @@ class DateDecayConfig(BaseModel):
     min_weight: float = 0.5
 
 
+class CacheConfig(BaseModel):
+    """缓存配置"""
+
+    db_path: str = "./data/cache.db"
+    ttl_seconds: int = 3600
+    max_entries: int = 1000
+
+    @field_validator("db_path")
+    @classmethod
+    def expand_cache_db_path(cls, v: str) -> str:
+        return str(Path(v).expanduser().resolve())
+
+
 class ConfidenceConfig(BaseModel):
     """置信度与融合权重配置"""
 
@@ -114,6 +127,7 @@ class Settings(BaseModel):
     # 检索引擎融合权重 (HybridEngine 读取)
     retrieval: dict[str, Any] = {"alpha": 0.7, "beta": 0.3}
     maintenance: dict[str, Any] = {"soft_delete_threshold": 0.2, "auto_vacuum": True}
+    cache: CacheConfig = Field(default_factory=CacheConfig)
 
     @field_validator("db_path")
     @classmethod

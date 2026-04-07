@@ -66,3 +66,9 @@ log_level: "DEBUG"
 maintenance:
   soft_delete_threshold: 0.2
   auto_vacuum: true
+
+# 缓存配置
+cache:
+  db_path: "./data/cache.db"
+  ttl_seconds: 3600        # 缓存过期时间（秒）
+  max_entries: 1000         # 最大缓存条目数
