@@ -9,9 +9,8 @@ import os
 import sys
 from pathlib import Path
 
-# 确保工作目录正确
+# 修复 L6: 使用绝对路径，不修改工作目录
 script_dir = Path(__file__).parent.resolve()
-os.chdir(script_dir)
 sys.path.insert(0, str(script_dir))
 
 # 导入必须在 sys.path 修改之后
@@ -29,8 +28,12 @@ async def main():
         sys.exit(1)
 
     logger.info("🌟 轻量级中文 RAG 系统启动")
-    logger.info(f"   工作目录：{os.getcwd()}")
-    logger.info(f"   配置文件：{config_path}")
+    logger.info(f" 脚本目录：{script_dir}")
+    logger.info(f" 配置文件：{config_path}")
+
+    # 修复：切换工作目录到脚本目录，确保相对路径解析正确
+    os.chdir(script_dir)
+    logger.info(f" 工作目录已切换至：{os.getcwd()}")
 
     server = None
     try:

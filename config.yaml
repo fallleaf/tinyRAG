@@ -16,10 +16,10 @@ db_path: "./data/rag.db"
 # 嵌入模型配置
 embedding_model:
   name: "BAAI/bge-small-zh-v1.5"
-  cache_dir: "./models"
+  cache_dir: "~/.cache/fastembed"
   size: "small"
   dimensions: 512
-  unload_after_seconds: 120
+  unload_after_seconds: 30
 
 # 分块配置
 chunking:
@@ -30,37 +30,34 @@ chunking:
 # 权重计算: final_weight = doc_type_weight × status_weight × date_weight
 # 未匹配字段使用 default_weight
 confidence:
+  # chunk 内容类型权重 (用于检索期动态计算)
+  type_rules:
+    code: 1.1
+    table: 1.05
+    header: 1.0
+    text: 0.95
+    list: 0.9
   # Frontmatter doc_type 权重 (文档分类)
   doc_type_rules:
-    technical: 1.2     # 技术文档
-    project: 1.15      # 项目文档
-    meeting: 1.1       # 会议记录
-    faq: 1.05          # FAQ / 复盘
-    blog: 1.0          # 日记 / 博客
-    reflection: 0.95   # 反思 / 总结
+    blog: 1.0
+    diary: 1.1
+    project: 1.15
+    note: 1.0
   # Frontmatter status 权重 (任务/项目状态)
   status_rules:
-    "进行中": 1.2
-    "已定稿": 1.5
-    "待开始": 0.9
-    "已归档": 0.8
+    "已完成": 1.1
+    "进行中": 0.9
+    "草稿": 0.7
   # 日期衰减: 越新的文档权重越高
   date_decay:
     enabled: true
-    half_life_days: 365    # 半衰期(天): 文档超过此天数后权重降为 0.5 × default
+    half_life_days: 180    # 半衰期(天): 文档超过此天数后权重降为 0.5 × default
     min_weight: 0.5        # 衰减下限
   # 未匹配时的默认权重
   default_weight: 1.0
-  # RRF 融合参数 (检索阶段使用)
-  fusion:
-    alpha: 0.6
-    beta: 0.2
-
-# 内存限制 (MB)
-memory_limit_mb: 1000
 
 # 日志级别
-log_level: "DEBUG"
+log_level: "INFO"
 
 # 数据库维护策略
 maintenance:
@@ -72,3 +69,8 @@ cache:
   db_path: "./data/cache.db"
   ttl_seconds: 3600        # 缓存过期时间（秒）
   max_entries: 1000         # 最大缓存条目数
+
+# 检索引擎融合权重 (HybridEngine 读取)
+retrieval:
+  alpha: 0.7
+  beta: 0.3

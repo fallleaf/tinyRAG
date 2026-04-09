@@ -29,7 +29,8 @@ from retriever.hybrid_engine import HybridEngine  # noqa: E402
 from storage.database import DatabaseManager  # noqa: E402
 from utils.logger import setup_logger  # noqa: E402
 
-logger = setup_logger(level="INFO", log_file="logs/cli.log")
+# 修复 L6: 使用绝对路径，避免依赖 CWD
+logger = setup_logger(level="INFO", log_file=str(script_dir / "logs" / "cli.log"))
 
 
 def cmd_status(args):
@@ -46,16 +47,10 @@ def cmd_status(args):
 
             db = DatabaseManager(str(db_path))
             try:
-                chunk_count = db.conn.execute(
-                    "SELECT COUNT(*) FROM chunks WHERE is_deleted=0"
-                ).fetchone()[0]
-                file_count = db.conn.execute(
-                    "SELECT COUNT(*) FROM files WHERE is_deleted=0"
-                ).fetchone()[0]
+                chunk_count = db.conn.execute("SELECT COUNT(*) FROM chunks WHERE is_deleted=0").fetchone()[0]
+                file_count = db.conn.execute("SELECT COUNT(*) FROM files WHERE is_deleted=0").fetchone()[0]
                 print(f"   活跃 Chunk:{chunk_count} | 活跃 Files:{file_count}")
-                print(
-                    f"   向量支持:{'✅ 已启用' if db.vec_support else '⚠️ 已降级(FTS5)'}"
-                )
+                print(f"   向量支持:{'✅ 已启用' if db.vec_support else '⚠️ 已降级(FTS5)'}")
             finally:
                 db.close()
         else:
@@ -94,19 +89,23 @@ def cmd_search(args):
             logger.error("❌ 数据库不存在,请先运行索引构建.")
             return 1
 
-        # CLI 权重覆盖 → 写入 retrieval 配置
+        # 修复 M5: 使用局部变量，不修改共享 config
+        alpha = cfg.retrieval.get("alpha", 0.7)
+        beta = cfg.retrieval.get("beta", 0.3)
+
+        # CLI 权重覆盖
         if args.alpha is not None:
-            cfg.retrieval["alpha"] = args.alpha
+            alpha = args.alpha
         if args.beta is not None:
-            cfg.retrieval["beta"] = args.beta
+            beta = args.beta
 
         # 通过 alpha/beta 比值模拟检索模式
         if args.mode == "keyword":
-            cfg.retrieval["alpha"] = 0.0
-            cfg.retrieval["beta"] = 1.0
+            alpha = 0.0
+            beta = 1.0
         elif args.mode == "semantic":
-            cfg.retrieval["alpha"] = 1.0
-            cfg.retrieval["beta"] = 0.0
+            alpha = 1.0
+            beta = 0.0
 
         # 构建 vault 过滤列表
         if args.vaults:
@@ -115,11 +114,10 @@ def cmd_search(args):
             vaults = [v.name for v in cfg.vaults if v.enabled]
             vaults = vaults if vaults else None
 
-        logger.info(
-            f"🔍 检索参数: alpha={cfg.retrieval['alpha']}, beta={cfg.retrieval['beta']}, vaults={vaults}"
-        )
+        logger.info(f"🔍 检索参数: alpha={alpha}, beta={beta}, vaults={vaults}")
 
-        db = DatabaseManager(str(db_path))
+        # 修复 M4: 从 config 读取维度
+        db = DatabaseManager(str(db_path), vec_dimension=cfg.embedding_model.dimensions)
 
         # 初始化嵌入引擎
         embed_engine = EmbeddingEngine(
@@ -133,9 +131,8 @@ def cmd_search(args):
         retriever = HybridEngine(config=cfg, db=db, embed_engine=embed_engine)
 
         start = time.time()
-        results = retriever.search(
-            query=args.query, limit=args.top_k, vault_filter=vaults
-        )
+        # 修复 M5: 传入 alpha/beta 参数
+        results = retriever.search(query=args.query, limit=args.top_k, vault_filter=vaults, alpha=alpha, beta=beta)
         elapsed = time.time() - start
 
         print(f"\n📊 检索结果 ({len(results)} 条,耗时 {elapsed:.2f}s):\n")
@@ -144,9 +141,7 @@ def cmd_search(args):
             return 0
 
         for i, r in enumerate(results, 1):
-            content_preview = (
-                r.content[:200] + "..." if len(r.content) > 200 else r.content
-            )
+            content_preview = r.content[:200] + "..." if len(r.content) > 200 else r.content
             scores = f"最终={r.final_score:.3f} | 语义={r.semantic_score:.3f} | 关键词={r.keyword_score:.3f} | 置信度={r.confidence_score:.2f}"
             print(f"{i}. [{scores}]")
             print(f"   来源:{r.absolute_path}")
@@ -156,6 +151,10 @@ def cmd_search(args):
     except Exception as e:
         logger.error(f"❌ 检索失败:{e}", exc_info=True)
         return 1
+    finally:
+        # 修复 L1: 确保 db 连接被关闭
+        if "db" in locals():
+            db.close()
 
 
 def cmd_config(args):

@@ -29,11 +29,6 @@ class VaultConfig(BaseModel):
         return str(Path(v).expanduser())
 
 
-class ConfidenceRule(BaseModel):
-    pattern: str
-    weight: float = 1.0
-
-
 class ModelConfig(BaseModel):
     """嵌入模型配置"""
 
@@ -73,13 +68,6 @@ class CacheConfig(BaseModel):
 class ConfidenceConfig(BaseModel):
     """置信度与融合权重配置"""
 
-    path_rules: list[ConfidenceRule] = Field(
-        default_factory=lambda: [
-            ConfidenceRule(pattern="03.日记/", weight=1.2),
-            ConfidenceRule(pattern="07.项目/", weight=1.1),
-            ConfidenceRule(pattern="**", weight=1.0),
-        ]
-    )
     # chunk 内容类型权重 (用于检索期动态计算)
     type_rules: dict[str, float] = {
         "code": 1.1,
@@ -105,8 +93,6 @@ class ConfidenceConfig(BaseModel):
     date_decay: DateDecayConfig = Field(default_factory=DateDecayConfig)
     # 未匹配字段时的默认权重
     default_weight: float = 1.0
-    # 融合权重 (兼容旧版 config.yaml)
-    fusion: dict[str, float] = {"alpha": 0.6, "beta": 0.2}
 
 
 class Settings(BaseModel):
@@ -122,7 +108,8 @@ class Settings(BaseModel):
     embedding_model: ModelConfig = Field(default_factory=ModelConfig)
     confidence: ConfidenceConfig = Field(default_factory=ConfidenceConfig)
     chunking: dict[str, int] = {"max_tokens": 512, "overlap": 50}
-    memory_limit_mb: int = 500
+    # 修复 L-new2: 删除死配置 memory_limit_mb（未被任何代码使用）
+    # memory_limit_mb: int = 500
     log_level: str = "INFO"
     # 检索引擎融合权重 (HybridEngine 读取)
     retrieval: dict[str, Any] = {"alpha": 0.7, "beta": 0.3}
@@ -132,7 +119,7 @@ class Settings(BaseModel):
     @field_validator("db_path")
     @classmethod
     def expand_db_path(cls, v: str) -> str:
-        return str(Path(v).resolve())
+        return str(Path(v).expanduser().resolve())
 
 
 def load_config(config_path: str = "config.yaml") -> Settings:
@@ -162,8 +149,6 @@ if __name__ == "__main__":
         print("✅ 配置加载成功")
         print(f"📂 启用仓库: {[v.name for v in cfg.vaults if v.enabled]}")
         print(f"🗄️ 数据库路径: {cfg.db_path}")
-        print(
-            f"🤖 模型: {cfg.embedding_model.name} (dim={cfg.embedding_model.dimensions})"
-        )
+        print(f"🤖 模型: {cfg.embedding_model.name} (dim={cfg.embedding_model.dimensions})")
     except Exception as e:
         print(e)

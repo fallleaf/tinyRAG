@@ -20,7 +20,7 @@ from datetime import date, datetime
 from enum import Enum
 from typing import Any
 
-from loguru import logger
+from utils.logger import logger
 
 try:
     import yaml
@@ -110,9 +110,7 @@ class MarkdownSplitter:
 
         return self._process_lines(content_body, create_chunks)
 
-    def _extract_confidence_meta(
-        self, frontmatter: dict, file_mtime: float | None
-    ) -> dict:
+    def _extract_confidence_meta(self, frontmatter: dict, file_mtime: float | None) -> dict:
         """
         实现 1、2、5 点设想：提取原始因子并注入缺省值
         """
@@ -333,10 +331,6 @@ class MarkdownSplitter:
 
         # 刷出最后残留
         if current_buffer:
-            chunks.extend(
-                create_chunks(
-                    current_buffer, current_type, section_stack, start_pos, current_pos
-                )
-            )
+            chunks.extend(create_chunks(current_buffer, current_type, section_stack, start_pos, current_pos))
 
         return chunks

@@ -27,10 +27,8 @@ import asyncio
 import contextlib
 import importlib.util
 import json
-import os
 import sys
 from collections.abc import Awaitable, Callable
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -291,137 +289,6 @@ class ScanTool(BaseTool):
     )
     schema: ClassVar[dict] = {"type": "object", "properties": {}}
 
-    def _process_file_worker(self, file_item: dict, splitter: MarkdownSplitter) -> tuple[int, list, str]:
-        """并行分块任务单元"""
-        abs_path = Path(file_item["absolute_path"])
-        try:
-            content = abs_path.read_text(encoding="utf-8")
-            mtime = file_item.get("mtime")
-            if mtime is None:
-                logger.warning(f"⚠️ 文件 {file_item['file_path']} 缺少 mtime，使用当前时间")
-            chunks = splitter.split(content, mtime)
-            return file_item["id"], chunks, file_item["file_path"]
-        except Exception as e:
-            logger.error(f"❌ 读取/分块失败：{abs_path} - {e}")
-            return file_item["id"], [], file_item["file_path"]
-
-    async def _index_changed_files(self, changed_paths: list[str]) -> None:
-        """为变更的文件创建 chunks 和向量（复用 build_index 逻辑）"""
-        # 1. 查询文件列表
-        placeholders = ",".join(["?"] * len(changed_paths))
-        cursor = self.ctx.db.conn.execute(
-            f"SELECT id, absolute_path, file_path, mtime FROM files WHERE absolute_path IN ({placeholders})",
-            changed_paths,
-        )
-        files_to_index = [dict(row) for row in cursor.fetchall()]
-
-        if not files_to_index:
-            logger.info("✨ 没有需要索引的文件")
-            return
-
-        logger.info(f"🚀 开始为 {len(files_to_index)} 个变更文件创建 chunks 和向量...")
-
-        # 2. 分块（使用线程池避免阻塞）
-        all_pending_chunks = []
-        with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
-            results = executor.map(
-                lambda f: self._process_file_worker(f, self.ctx.splitter),
-                files_to_index,
-            )
-            for f_id, chunks, f_path in results:
-                for c in chunks:
-                    all_pending_chunks.append((f_id, c, f_path))
-
-        if not all_pending_chunks:
-            logger.info("✨ 没有生成任何 chunks")
-            return
-
-        # 3. 分批向量化与入库
-        total_chunks = len(all_pending_chunks)
-        batch_size = 32
-        logger.info(f"🧩 待向量化块总数：{total_chunks}，采用 Batch Size: {batch_size}")
-
-        processed = 0
-        for i in range(0, total_chunks, batch_size):
-            batch = all_pending_chunks[i : i + batch_size]
-            texts = [item[1].content for item in batch]
-
-            try:
-                embeddings = await asyncio.to_thread(self.ctx.retriever.embed_engine.embed, texts)
-            except Exception as e:
-                skipped_files = [item[2] for item in batch]
-                logger.error(
-                    f"❌ 批次向量化失败: {e}，跳过 {len(skipped_files)} 个文件: {skipped_files[:5]}{'...' if len(skipped_files) > 5 else ''}"
-                )
-                continue
-
-            try:
-                for idx, ((file_id, chunk, f_path), emb) in enumerate(zip(batch, embeddings)):
-                    global_idx = processed + idx
-                    try:
-                        metadata_json = json.dumps(chunk.metadata or {}, ensure_ascii=False, default=_json_serialize)
-                    except Exception as e:
-                        logger.warning(f"⚠️ metadata 序列化失败，使用空对象：{e}")
-                        metadata_json = "{}"
-
-                    # 序列化置信度原始因子
-                    try:
-                        confidence_json = json.dumps(
-                            chunk.confidence_metadata or {},
-                            ensure_ascii=False,
-                            default=_json_serialize,
-                        )
-                    except Exception as e:
-                        logger.warning(f"⚠️ confidence_metadata 序列化失败，使用空对象：{e}")
-                        confidence_json = "{}"
-
-                    cursor = self.ctx.db.conn.execute(
-                        """
-                        INSERT INTO chunks (file_id, chunk_index, content, content_type, section_title, section_path,
-                        start_pos, end_pos, confidence_final_weight, metadata, confidence_json)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            file_id,
-                            global_idx,
-                            chunk.content,
-                            chunk.content_type.value,
-                            chunk.section_title,
-                            chunk.section_path,
-                            chunk.start_pos,
-                            chunk.end_pos,
-                            1.0,  # 占位值（已废弃），实际权重由 confidence_json + 检索期动态计算
-                            metadata_json,
-                            confidence_json,
-                        ),
-                    )
-                    new_chunk_id = cursor.lastrowid
-
-                    if self.ctx.db.vec_support:
-                        import array
-
-                        self.ctx.db.conn.execute(
-                            "INSERT INTO vectors (chunk_id, embedding) VALUES (?, ?)",
-                            (new_chunk_id, array.array("f", emb).tobytes()),
-                        )
-
-                    fts_text = _prepare_fts_content(chunk, f_path)
-                    self.ctx.db.conn.execute(
-                        "INSERT INTO fts5_index (rowid, content) VALUES (?, ?)",
-                        (new_chunk_id, fts_text),
-                    )
-
-                self.ctx.db.conn.commit()
-                processed += len(batch)
-                logger.info(f" ✅ 已完成：{processed} / {total_chunks}")
-
-            except Exception as e:
-                self.ctx.db.conn.rollback()
-                logger.error(f"❌ 批次提交失败：{e}", exc_info=True)
-                raise
-
-        logger.success(f"🎉 增量索引完成！共处理 {processed} 个 chunks")
-
     # P2-3: 补充参数类型注解
     async def run(self, args: dict[str, Any]) -> dict[str, Any]:
         await self.ctx.initialize()
@@ -429,16 +296,6 @@ class ScanTool(BaseTool):
         vault_configs = [(v.name, v.path) for v in self.ctx.config.vaults if v.enabled]
         report = await asyncio.to_thread(self.ctx.scanner.scan_vaults, vault_configs)
         await asyncio.to_thread(self.ctx.scanner.process_report, report)
-
-        # 🆕 增量索引：为新增、修改、移动的文件创建 chunks 和向量
-        changed_paths = []
-        for f in report.new_files + report.modified_files:
-            changed_paths.append(f.absolute_path)
-        for f in report.moved_files:
-            changed_paths.append(f.new_absolute_path)
-        if changed_paths:
-            await self._index_changed_files(changed_paths)
-
         return {
             "status": "success",
             "summary": report.summary(),
@@ -495,55 +352,6 @@ class RebuildTool(BaseTool):
         except Exception as e:
             logger.error(f"Index rebuild failed: {e}", exc_info=True)
             raise
-
-
-# =====================
-# Helper Functions for Incremental Indexing
-# =====================
-def _jieba_segment(text: str) -> str:
-    """对中文文本进行 jieba 分词，返回空格拼接的词串"""
-    if not text or not text.strip():
-        return ""
-    import jieba
-
-    return " ".join(jieba.cut_for_search(text))
-
-
-def _prepare_fts_content(chunk, file_path: str) -> str:
-    """构建复合检索字符串，所有中文文本字段经 jieba 分词后写入 FTS5"""
-    metadata = chunk.metadata or {}
-    tags = metadata.get("tags", [])
-    if tags is None:
-        tags = []
-    if isinstance(tags, str):
-        tags = [tags]
-    tag_str = " ".join([f"#{t.strip()}" for t in tags if t])
-
-    doc_type = metadata.get("doc_type") or ""
-    filename = os.path.basename(file_path)
-    section_title = chunk.section_title or ""
-
-    # 对所有含中文的文本字段做 jieba 分词，与检索端保持一致
-    parts = [
-        _jieba_segment(filename),
-        _jieba_segment(filename),  # 文件名重复加权
-        _jieba_segment(chunk.section_path or ""),
-        _jieba_segment(section_title),
-        _jieba_segment(section_title),  # 标题重复加权
-        _jieba_segment(tag_str),
-        _jieba_segment(doc_type),
-        _jieba_segment(chunk.content),  # 正文分词
-    ]
-    return " ".join(filter(None, parts)).strip()
-
-
-def _json_serialize(obj):
-    """自定义 JSON 序列化器"""
-    from datetime import date, datetime
-
-    if isinstance(obj, (datetime, date)):
-        return obj.isoformat()
-    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
 
 # =====================

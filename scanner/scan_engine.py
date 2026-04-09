@@ -24,9 +24,8 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from loguru import logger
-
 from storage.database import DatabaseManager
+from utils.logger import logger
 
 # 默认跳过的目录名（不进入子目录扫描）
 DEFAULT_SKIP_DIRS = frozenset(
@@ -127,9 +126,7 @@ class Scanner:
             logger.error(f"❌ 计算哈希失败：{file_path} - {e}")
             return None
 
-    def _walk_vaults(
-        self, vault_configs: list[tuple[str, str]]
-    ) -> dict[str, tuple[str, str, int, int]]:
+    def _walk_vaults(self, vault_configs: list[tuple[str, str]]) -> dict[str, tuple[str, str, int, int]]:
         """
         阶段 1 — 轻量路径收集：
         遍历所有 vault，收集磁盘上 .md 文件的路径和 stat 信息。
@@ -194,9 +191,7 @@ class Scanner:
             f"FROM files WHERE is_deleted = 0 AND vault_name IN ({placeholders})"
         )
         cursor = self.db.conn.execute(sql, scanned_vaults)
-        db_files: dict[str, dict[str, Any]] = {
-            row["absolute_path"]: dict(row) for row in cursor.fetchall()
-        }
+        db_files: dict[str, dict[str, Any]] = {row["absolute_path"]: dict(row) for row in cursor.fetchall()}
 
         # ═══ 阶段 1：轻量路径收集 ═══
         disk_files = self._walk_vaults(vault_configs)
@@ -204,9 +199,7 @@ class Scanner:
         db_paths = set(db_files.keys())
 
         # 消失文件集：DB 中有但磁盘上没有（可能被删除或被移动到其他位置）
-        disappeared: dict[str, dict[str, Any]] = {
-            ap: meta for ap, meta in db_files.items() if ap not in disk_paths
-        }
+        disappeared: dict[str, dict[str, Any]] = {ap: meta for ap, meta in db_files.items() if ap not in disk_paths}
 
         # hash → 消失文件的反向索引（每个 hash 只保留首个匹配，避免歧义）
         disappeared_by_hash: dict[str, dict[str, Any]] = {}
@@ -230,9 +223,7 @@ class Scanner:
 
             if new_hash != db_meta["file_hash"]:
                 # 内容确实变化 → 标记为修改
-                report.modified_files.append(
-                    FileMeta(vault_name, rel_path, abs_path, new_hash, size, mtime)
-                )
+                report.modified_files.append(FileMeta(vault_name, rel_path, abs_path, new_hash, size, mtime))
                 logger.info(f"📝 检测到内容修改：{rel_path}")
             else:
                 # mtime/size 变化但内容未变 → 仅更新时间戳
@@ -262,17 +253,11 @@ class Scanner:
                         new_file_size=size,
                     )
                 )
-                logger.info(
-                    f"🔄 检测到文件移动："
-                    f"{src['vault_name']}/{src['file_path']} → "
-                    f"{vault_name}/{rel_path}"
-                )
+                logger.info(f"🔄 检测到文件移动：{src['vault_name']}/{src['file_path']} → {vault_name}/{rel_path}")
                 # 从消失集中移除，避免同一源文件被重复匹配
                 disappeared.pop(src["absolute_path"], None)
             else:
-                report.new_files.append(
-                    FileMeta(vault_name, rel_path, abs_path, new_hash, size, mtime)
-                )
+                report.new_files.append(FileMeta(vault_name, rel_path, abs_path, new_hash, size, mtime))
                 logger.info(f"➕ 检测到新文件：{rel_path}")
 
         # ═══ 阶段 2c：删除检测 — 未被匹配为移动源的消失文件 ═══
@@ -302,8 +287,9 @@ class Scanner:
         try:
             # ── 新增文件 ──────────────────────────────────
             for meta in report.new_files:
+                # 修复 L4: 传入 vault_name 参数，避免跨 vault 恢复错绑
                 existing = self.db.find_file_by_hash(
-                    meta.file_hash, include_deleted=True
+                    meta.file_hash, include_deleted=True, vault_name=meta.vault_name
                 )
                 if existing and existing["is_deleted"] == 1:
                     # 恢复已软删除的记录（避免重复 INSERT + 保留历史关联）
@@ -362,9 +348,7 @@ class Scanner:
                     ),
                 )
                 logger.debug(
-                    f"🔄 已更新移动文件："
-                    f"{move.old_vault_name}/{move.old_path} → "
-                    f"{move.new_vault_name}/{move.new_path}"
+                    f"🔄 已更新移动文件：{move.old_vault_name}/{move.old_path} → {move.new_vault_name}/{move.new_path}"
                 )
 
             # ── 删除文件（含 FTS5/vectors 联动清理）─────────
@@ -385,8 +369,7 @@ class Scanner:
                 # 清理 FTS5 独立表（释放索引空间）
                 try:
                     self.db.conn.execute(
-                        f"DELETE FROM fts5_index WHERE rowid IN ("
-                        f"SELECT id FROM chunks WHERE file_id IN ({ph}))",
+                        f"DELETE FROM fts5_index WHERE rowid IN (SELECT id FROM chunks WHERE file_id IN ({ph}))",
                         report.deleted_files,
                     )
                 except Exception as e:
@@ -394,8 +377,7 @@ class Scanner:
                 # 清理 vectors（释放向量存储空间）
                 try:
                     self.db.conn.execute(
-                        f"DELETE FROM vectors WHERE chunk_id IN ("
-                        f"SELECT id FROM chunks WHERE file_id IN ({ph}))",
+                        f"DELETE FROM vectors WHERE chunk_id IN (SELECT id FROM chunks WHERE file_id IN ({ph}))",
                         report.deleted_files,
                     )
                 except Exception as e:
@@ -423,8 +405,7 @@ class Scanner:
         # 清理 FTS5 独立表
         try:
             self.db.conn.execute(
-                "DELETE FROM fts5_index WHERE rowid IN ("
-                "SELECT id FROM chunks WHERE file_id=? AND is_deleted=1)",
+                "DELETE FROM fts5_index WHERE rowid IN (SELECT id FROM chunks WHERE file_id=? AND is_deleted=1)",
                 (file_id,),
             )
         except Exception as e:
@@ -432,8 +413,7 @@ class Scanner:
         # 清理 vectors
         try:
             self.db.conn.execute(
-                "DELETE FROM vectors WHERE chunk_id IN ("
-                "SELECT id FROM chunks WHERE file_id=? AND is_deleted=1)",
+                "DELETE FROM vectors WHERE chunk_id IN (SELECT id FROM chunks WHERE file_id=? AND is_deleted=1)",
                 (file_id,),
             )
         except Exception as e:

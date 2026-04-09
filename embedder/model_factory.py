@@ -13,9 +13,7 @@ except ImportError:
 
 
 class EmbeddingModel:
-    def __init__(
-        self, model_name: str, cache_dir: str, unload_after_seconds: int = 30
-    ):  # ✅ 修复：双下划线
+    def __init__(self, model_name: str, cache_dir: str, unload_after_seconds: int = 30):  # ✅ 修复：双下划线
         self.model_name = model_name
         self.cache_dir = cache_dir
         self.unload_after_seconds = unload_after_seconds
@@ -24,14 +22,14 @@ class EmbeddingModel:
         self._lock = threading.Lock()
         self._unload_timer: threading.Timer | None = None
         self.dimension: int = 0
-        self._init_model()
+        # 修复 M5: 在锁内调用 _init_model()，与 get_embedding() 中的加锁调用互斥
+        with self._lock:
+            self._init_model()
 
     def _init_model(self):
         try:
             logger.info(f"🔄 正在加载模型：{self.model_name} ...")
-            self._model = TextEmbedding(
-                model_name=self.model_name, cache_dir=self.cache_dir
-            )
+            self._model = TextEmbedding(model_name=self.model_name, cache_dir=self.cache_dir)
             self._last_used = time.time()
             logger.success(f"✅ 模型加载成功：{self.model_name}")
 
@@ -49,17 +47,21 @@ class EmbeddingModel:
         self._unload_timer.daemon = True
         self._unload_timer.start()
 
+    def _unload_unlocked(self):
+        """不加锁的卸载方法，由调用方负责持锁"""
+        if self._model:
+            logger.info("🗑️ 正在卸载模型以释放内存...")
+            self._model = None
+            self._last_used = 0
+            if self._unload_timer:
+                self._unload_timer.cancel()
+                self._unload_timer = None
+            logger.info("✅ 模型已卸载")
+
     def unload(self):
+        """卸载模型（公开方法，自动加锁）"""
         with self._lock:
-            if self._model:
-                logger.info("🗑️ 正在卸载模型以释放内存...")
-                self._model = None
-                # ✅ 修复：移除 gc.collect() 以避免 STW 停顿
-                self._last_used = 0
-                if self._unload_timer:
-                    self._unload_timer.cancel()
-                    self._unload_timer = None
-                logger.info("✅ 模型已卸载")
+            self._unload_unlocked()
 
     def get_embedding(self, texts: list[str]) -> list[list[float]]:
         with self._lock:
@@ -76,5 +78,6 @@ class EmbeddingModel:
                 return [list(e) for e in embeddings]
             except Exception as e:
                 logger.error(f"❌ 向量化失败：{e}")
-                self.unload()
+                # 修复 C1: 调用无锁版本，避免死锁
+                self._unload_unlocked()
                 raise

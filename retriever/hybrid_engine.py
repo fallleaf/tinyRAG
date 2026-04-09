@@ -14,13 +14,25 @@ import importlib.util
 import json
 import math
 import re
+import threading
+from collections import OrderedDict
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-import jieba
-from loguru import logger
-
 from storage.database import DatabaseManager
+from utils.logger import logger
+
+# 检查 jieba 是否可用
+try:
+    import jieba
+
+    JIEBA_AVAILABLE = True
+    # 修复 L5: 模块级别调用 jieba.initialize()，避免首次使用时的延迟
+    jieba.initialize()
+except ImportError:
+    JIEBA_AVAILABLE = False
+    logger.warning("⚠️ jieba 未安装，关键词检索功能将降级")
 
 # 检查 cache 模块是否可用
 _cache_spec = importlib.util.find_spec("storage.cache")
@@ -36,40 +48,24 @@ else:
     CACHE_AVAILABLE = False
 
 
+# 修复 L7: 使用 @dataclass 简化 RetrievalResult
+@dataclass
 class RetrievalResult:
-    def __init__(
-        self,
-        chunk_id: int,
-        content: str,
-        file_path: str,
-        absolute_path: str,
-        section: str,
-        start_pos: int,
-        end_pos: int,
-        vault_name: str,
-        chunk_type: str,
-        semantic_score: float,
-        keyword_score: float,
-        confidence_score: float,
-        final_score: float,
-        confidence_reason: str,
-        file_hash: str,
-    ):
-        self.chunk_id = chunk_id
-        self.content = content
-        self.file_path = file_path
-        self.absolute_path = absolute_path
-        self.section = section
-        self.start_pos = start_pos
-        self.end_pos = end_pos
-        self.vault_name = vault_name
-        self.chunk_type = chunk_type
-        self.semantic_score = semantic_score
-        self.keyword_score = keyword_score
-        self.confidence_score = confidence_score
-        self.final_score = final_score
-        self.confidence_reason = confidence_reason
-        self.file_hash = file_hash
+    chunk_id: int
+    content: str
+    file_path: str
+    absolute_path: str
+    section: str
+    start_pos: int
+    end_pos: int
+    vault_name: str
+    chunk_type: str
+    semantic_score: float
+    keyword_score: float
+    confidence_score: float
+    final_score: float
+    confidence_reason: str
+    file_hash: str
 
 
 class HybridEngine:
@@ -81,7 +77,10 @@ class HybridEngine:
         self.beta = config.retrieval.get("beta", 0.3)  # 关键词权重
 
         # 缓存初始化：优先使用持久化 QueryCache，降级为内存字典
-        self._memory_cache: dict[str, list[dict]] = {}
+        # 修复 M2: 使用 OrderedDict 实现 LRU 缓存
+        self._memory_cache: OrderedDict = OrderedDict()
+        self._memory_cache_max_size = 500
+        self._cache_lock = threading.Lock()  # 添加锁保护
         self._cache = None
         if CACHE_AVAILABLE:
             try:
@@ -100,15 +99,24 @@ class HybridEngine:
 
     # ─── 缓存键生成 ───
     def _make_cache_key(
-        self, query: str, limit: int, vault_filter: list[str] | None
+        self,
+        query: str,
+        limit: int,
+        vault_filter: list[str] | None,
+        alpha: float | None = None,
+        beta: float | None = None,
     ) -> str:
         """基于查询内容 + 参数生成确定性缓存键"""
         raw = f"{query}|{limit}"
         if vault_filter:
             raw += f"|{','.join(sorted(vault_filter))}"
-        # alpha/beta 可能被 server.py 动态修改，也纳入缓存键
-        raw += f"|a={self.alpha:.2f}|b={self.beta:.2f}"
-        return hashlib.md5(raw.encode()).hexdigest()
+        # 修复 M1: 使用实际生效的 alpha/beta
+        if alpha is not None:
+            raw += f"|a={alpha:.2f}"
+        if beta is not None:
+            raw += f"|b={beta:.2f}"
+        # 修复 L4: 使用 hashlib.sha256 替代 hashlib.md5，降低碰撞风险
+        return hashlib.sha256(raw.encode()).hexdigest()
 
     # ─── 序列化 / 反序列化 ───
     @staticmethod
@@ -151,25 +159,20 @@ class HybridEngine:
             except Exception as e:
                 logger.warning(f"持久化缓存读取失败: {e}")
 
-        # 2) 内存缓存
-        cached = self._memory_cache.get(cache_key)
-        if cached is not None:
-            logger.debug("Cache HIT (memory)")
-            return self._deserialize_results(cached)
+        # 2) 内存缓存（带锁保护）
+        with self._cache_lock:
+            cached = self._memory_cache.get(cache_key)
+            if cached is not None:
+                # LRU: 移动到末尾
+                self._memory_cache.move_to_end(cache_key)
+                logger.debug("Cache HIT (memory)")
+                return self._deserialize_results(cached)
 
         return None
 
     def _cache_set(self, cache_key: str, results: list[RetrievalResult]) -> None:
         """写入缓存，双层同步"""
         serialized = self._serialize_results(results)
-        # 内存缓存始终写入
-        self._memory_cache[cache_key] = serialized
-        # 内存缓存 LRU 淘汰：超过 500 条时清理最旧的一半
-        if len(self._memory_cache) > 500:
-            keys = list(self._memory_cache.keys())
-            for k in keys[: len(keys) // 2]:
-                del self._memory_cache[k]
-            logger.debug(f"Memory cache pruned to {len(self._memory_cache)} entries")
 
         # 持久化缓存
         if self._cache is not None:
@@ -178,15 +181,35 @@ class HybridEngine:
             except Exception as e:
                 logger.warning(f"持久化缓存写入失败: {e}")
 
+        # 内存缓存（带锁保护）
+        with self._cache_lock:
+            self._memory_cache[cache_key] = serialized
+            # LRU: 移动到末尾
+            self._memory_cache.move_to_end(cache_key)
+            # LRU: 超过最大容量时删除最旧的
+            if len(self._memory_cache) > self._memory_cache_max_size:
+                self._memory_cache.popitem(last=False)
+                logger.debug(f"Memory cache pruned to {len(self._memory_cache)} entries")
+
     def search(
-        self, query: str, limit: int = 10, vault_filter: list[str] | None = None
+        self,
+        query: str,
+        limit: int = 10,
+        vault_filter: list[str] | None = None,
+        alpha: float | None = None,
+        beta: float | None = None,
     ) -> list[RetrievalResult]:
         """执行混合检索（带缓存）"""
         if not query.strip():
             return []
 
+        # 使用传入的 alpha/beta 或默认值
+        effective_alpha = alpha if alpha is not None else self.alpha
+        effective_beta = beta if beta is not None else self.beta
+
         # 0. 缓存查询
-        cache_key = self._make_cache_key(query, limit, vault_filter)
+        # 修复 M1: 使用 effective 值生成缓存键
+        cache_key = self._make_cache_key(query, limit, vault_filter, effective_alpha, effective_beta)
         cached = self._cache_get(cache_key)
         if cached is not None:
             return cached
@@ -195,12 +218,12 @@ class HybridEngine:
         query_vector = self.embed_engine.embed([query])[0]
 
         # 2. 关键词预处理 (jieba 分词 + 过滤)
-        keywords = " ".join(jieba.cut_for_search(query))
+        keywords = " ".join(jieba.cut_for_search(query)) if JIEBA_AVAILABLE else query
         clean_keywords = re.sub(r"[^\w\s\u4e00-\u9fa5]", " ", keywords).strip()
 
         # 3. 执行检索逻辑
         results = self._search_internal(
-            query_vector, clean_keywords, limit, vault_filter
+            query_vector, clean_keywords, limit, vault_filter, effective_alpha, effective_beta
         )
 
         # 4. 写入缓存
@@ -248,9 +271,7 @@ class HybridEngine:
         conf_score = math.log1p(raw_factor)
 
         # E. 生成理由描述
-        reason = (
-            f"Type:{doc_type}({dt_w}) | Status:{status}({st_w}) | Age:{days_passed}d"
-        )
+        reason = f"Type:{doc_type}({dt_w}) | Status:{status}({st_w}) | Age:{days_passed}d"
 
         return conf_score, reason
 
@@ -260,6 +281,8 @@ class HybridEngine:
         keywords: str,
         limit: int,
         vault_filter: list[str] | None,
+        alpha: float,
+        beta: float,
     ) -> list[RetrievalResult]:
         """内部检索逻辑：整合向量、FTS5 与 动态权重"""
 
@@ -285,24 +308,28 @@ class HybridEngine:
             WHERE c.id IN ({placeholders}) AND c.is_deleted = 0
         """
 
-        rows = self.db.conn.execute(query_sql, candidate_ids).fetchall()
+        # 修复 C2: 添加 vault_filter 过滤条件
+        query_params = list(candidate_ids)
+        if vault_filter:
+            query_sql += " AND f.vault_name IN ({})".format(",".join(["?"] * len(vault_filter)))
+            query_params.extend(vault_filter)
+
+        rows = self.db.conn.execute(query_sql, query_params).fetchall()
 
         final_results = []
         for row in rows:
             cid = row["id"]
 
             # --- 动态计算置信度 ---
-            conf_score, conf_reason = self._calculate_dynamic_confidence(
-                row["confidence_json"]
-            )
+            conf_score, conf_reason = self._calculate_dynamic_confidence(row["confidence_json"])
 
             # --- 分值融合公式 ---
             # 向量分 (0-1 之间)
-            v_score = vec_scores.get(cid, 0.0) * self.alpha
+            v_score = vec_scores.get(cid, 0.0) * alpha
 
             # 关键词分 (FTS5 分数可能很大，同样采用对数平滑对齐量级)
             raw_kw = kw_scores.get(cid, 0.0)
-            k_score = math.log1p(max(0, raw_kw)) * self.beta
+            k_score = math.log1p(max(0, raw_kw)) * beta
 
             # 最终加权
             # (基础得分) * 动态置信度系数

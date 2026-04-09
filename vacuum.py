@@ -8,8 +8,6 @@ import argparse
 import os
 import sys
 
-from loguru import logger
-
 # 设置工作目录
 script_dir = os.path.dirname(os.path.abspath(__file__))
 os.chdir(script_dir)
@@ -18,9 +16,14 @@ sys.path.insert(0, script_dir)
 # 导入 RAG 系统模块（必须在设置 path 之后）
 from config import load_config  # noqa: E402
 from storage.database import DatabaseManager  # noqa: E402
+from utils.logger import logger, setup_logger  # noqa: E402
+
+# 初始化日志
+_script_dir = os.path.dirname(os.path.abspath(__file__))
+setup_logger(level="INFO", log_file=os.path.join(_script_dir, "logs", "vacuum.log"))
 
 
-def check_vacuum_needed(db: DatabaseManager) -> dict:
+def check_vacuum_needed(db: DatabaseManager, config) -> dict:
     """检查是否需要执行 VACUUM"""
     # 检查 files 表
     cursor = db.conn.execute("SELECT COUNT(*) FROM files WHERE is_deleted = 1")
@@ -39,13 +42,20 @@ def check_vacuum_needed(db: DatabaseManager) -> dict:
     chunks_ratio = (chunks_deleted / chunks_total * 100) if chunks_total > 0 else 0
 
     # 获取数据库文件大小
-    # 使用相对于脚本目录的路径，避免大小写和绝对路径问题
-    db_path = os.path.join(script_dir, "data", "rag.db")
+    # 修复 C2: 使用传入的 config.db_path
+    db_path = config.db_path
     file_size_mb = os.path.getsize(db_path) / (1024 * 1024)
+
+    # 修复 L-new3: 从 config.maintenance 读取阈值，兼容 dict 和对象访问
+    maintenance = getattr(config, "maintenance", {}) or {}
+    if isinstance(maintenance, dict):
+        threshold_pct = maintenance.get("soft_delete_threshold", 0.2) * 100
+    else:
+        threshold_pct = getattr(maintenance, "soft_delete_threshold", 0.2) * 100
 
     # 取较高的比例作为判断依据
     max_ratio = max(files_ratio, chunks_ratio)
-    needs_vacuum = max_ratio > 20
+    needs_vacuum = max_ratio > threshold_pct
 
     return {
         "files_deleted": files_deleted,
@@ -55,6 +65,7 @@ def check_vacuum_needed(db: DatabaseManager) -> dict:
         "chunks_active": chunks_active,
         "chunks_ratio": chunks_ratio,
         "max_ratio": max_ratio,
+        "threshold_pct": threshold_pct,  # 新增：记录实际使用的阈值
         "file_size_mb": file_size_mb,
         "needs_vacuum": needs_vacuum,
     }
@@ -125,15 +136,9 @@ def execute_vacuum(db: DatabaseManager, dry_run: bool = False) -> bool:
 
 def main():
     parser = argparse.ArgumentParser(description="RAG 数据库 VACUUM 工具")
-    parser.add_argument(
-        "--dry-run", action="store_true", help="仅检查，不执行清理和 VACUUM"
-    )
-    parser.add_argument(
-        "--clean-only", action="store_true", help="仅清理软删除记录，不执行 VACUUM"
-    )
-    parser.add_argument(
-        "--vacuum-only", action="store_true", help="仅执行 VACUUM，不清理记录"
-    )
+    parser.add_argument("--dry-run", action="store_true", help="仅检查，不执行清理和 VACUUM")
+    parser.add_argument("--clean-only", action="store_true", help="仅清理软删除记录，不执行 VACUUM")
+    parser.add_argument("--vacuum-only", action="store_true", help="仅执行 VACUUM，不清理记录")
     parser.add_argument("--force", action="store_true", help="即使软删除比例低也执行")
     args = parser.parse_args()
 
@@ -147,7 +152,8 @@ def main():
         sys.exit(1)
 
     # 检查状态
-    stats = check_vacuum_needed(db)
+    # 修复 C2: 传入 config 参数
+    stats = check_vacuum_needed(db, config)
 
     logger.info("📊 数据库状态:")
     logger.info(
@@ -161,29 +167,25 @@ def main():
     if stats["max_ratio"] > 20 or args.force:
         if args.dry_run:
             logger.info("💡 建议执行清理和 VACUUM (软删除比例 > 20%)")
-            logger.info(
-                f" 预计清理：{stats['chunks_deleted']} chunks + {stats['files_deleted']} files"
-            )
+            logger.info(f" 预计清理：{stats['chunks_deleted']} chunks + {stats['files_deleted']} files")
         else:
             # 1. 先清理软删除记录
             if not args.vacuum_only:
                 logger.info("\n🧹 步骤 1: 清理软删除记录...")
                 clean_stats = clean_deleted_records(db, dry_run=False)
-                logger.info(
-                    f" 共删除 {clean_stats['chunks_deleted'] + clean_stats['files_deleted']} 条记录"
-                )
+                logger.info(f" 共删除 {clean_stats['chunks_deleted'] + clean_stats['files_deleted']} 条记录")
 
             # 2. 执行 VACUUM
             if not args.clean_only:
                 logger.info("\n🗜️ 步骤 2: 执行 VACUUM...")
                 if execute_vacuum(db, dry_run=False):
                     # 验证结果
-                    new_stats = check_vacuum_needed(db)
+                    # 修复 C2: 传入 config 参数
+                    new_stats = check_vacuum_needed(db, config)
 
                     # 检查文件大小变化
-                    new_size = os.path.getsize(
-                        os.path.join(script_dir, "data", "rag.db")
-                    ) / (1024 * 1024)
+                    # 修复 H1: 使用 config.db_path 而非硬编码
+                    new_size = os.path.getsize(config.db_path) / (1024 * 1024)
                     saved = stats["file_size_mb"] - new_size
                     if saved > 0:
                         logger.success(
@@ -192,9 +194,7 @@ def main():
                     else:
                         logger.info(f"ℹ️ 文件大小变化：{new_size:.2f} MB")
 
-                    logger.info(
-                        f" 清理后 chunks 软删除比例：{new_stats['chunks_ratio']:.1f}%"
-                    )
+                    logger.info(f" 清理后 chunks 软删除比例：{new_stats['chunks_ratio']:.1f}%")
                 else:
                     sys.exit(1)
             else:

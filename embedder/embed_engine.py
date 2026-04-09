@@ -34,11 +34,10 @@ class EmbeddingEngine:
                 batch_embs = self.model.get_embedding(batch)
                 all_embeddings.extend(batch_embs)
 
-                if (i + self.batch_size) % 100 == 0:
+                # 修复 L1: 进度日志条件改为 (i + batch_size) % 100 == 0 or i == 0
+                if (i + self.batch_size) % 100 == 0 or i == 0:
                     elapsed = time.time() - start_time
-                    logger.debug(
-                        f"  已处理 {i + self.batch_size}/{len(texts)} 条 ({elapsed:.2f}s)"
-                    )
+                    logger.debug(f"  已处理 {i + self.batch_size}/{len(texts)} 条 ({elapsed:.2f}s)")
             except Exception as e:
                 # ✅ 修复：不再 continue，而是抛出异常以防止批次错位导致的数据损坏
                 logger.error(f"❌ 批次 {i // self.batch_size} 处理失败: {e}")

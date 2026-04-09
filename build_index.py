@@ -16,17 +16,18 @@ from pathlib import Path
 from typing import Any
 
 import jieba
-from loguru import logger
 
 from chunker.markdown_splitter import MarkdownSplitter
 from config import load_config
 from embedder.embed_engine import EmbeddingEngine
 from scanner.scan_engine import Scanner
 from storage.database import DatabaseManager
-from utils.logger import setup_logger
+from utils.logger import logger, setup_logger
 
 # 初始化日志
-setup_logger(level="INFO", log_file="logs/build_index.log")
+# 修复 L6: 使用绝对路径，避免依赖 CWD
+_script_dir = Path(__file__).parent.resolve()
+setup_logger(level="INFO", log_file=str(_script_dir / "logs" / "build_index.log"))
 
 
 def _jieba_segment(text: str) -> str:
@@ -73,14 +74,16 @@ def json_serialize(obj):
     raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
 
-def process_file_worker(
-    file_item: dict, splitter: MarkdownSplitter
-) -> tuple[int, list[Any], str]:
+def process_file_worker(file_item: dict, splitter: MarkdownSplitter) -> tuple[int, list[Any], str]:
     """并行分块任务单元"""
     abs_path = Path(file_item["absolute_path"])
     try:
         content = abs_path.read_text(encoding="utf-8")
-        chunks = splitter.split(content, file_item.get("mtime"))
+        # 修复 H_new2: 添加 mtime 防御性检查
+        mtime = file_item.get("mtime")
+        if mtime is None:
+            logger.warning(f"⚠️ 文件 {file_item['file_path']} 缺少 mtime，使用当前时间")
+        chunks = splitter.split(content, mtime)
         return file_item["id"], chunks, file_item["file_path"]
     except Exception as e:
         logger.error(f"❌ 读取/分块失败：{abs_path} - {e}")
@@ -100,7 +103,8 @@ def main():
         logger.critical(f"❌ 配置加载失败：{e}")
         return 1
 
-    db = DatabaseManager(config.db_path)
+    # 修复 M4: 从 config 读取维度
+    db = DatabaseManager(config.db_path, vec_dimension=config.embedding_model.dimensions)
     scanner = Scanner(db)
 
     # ✅ 修复 B5：MarkdownSplitter 构造函数接收完整 config 对象
@@ -133,18 +137,22 @@ def main():
     files_to_index = []
     if args.force:
         logger.info("🔄 模式：强制重建所有索引")
-        cursor = db.conn.execute(
-            "SELECT id, absolute_path, file_path, mtime FROM files WHERE is_deleted = 0"
-        )
-        files_to_index = [dict(row) for row in cursor.fetchall()]
+        # 修复 H1: 仅删除索引数据，保留 files 表（行 133-134 已正确扫描）
+        # 避免双重扫描和重复 hash 计算
         db.conn.execute("DELETE FROM fts5_index")
         db.conn.execute("DELETE FROM vectors")
         db.conn.execute("DELETE FROM chunks")
+        # 修复 L7: 重置软删除标记，使 force 模式真正重建所有文件
+        db.conn.execute("UPDATE files SET is_deleted = 0")
+        db.conn.commit()
+        # 直接利用已有 files，无需重新扫描
+        cursor = db.conn.execute("SELECT id, absolute_path, file_path, mtime FROM files WHERE is_deleted = 0")
+        files_to_index = [dict(row) for row in cursor.fetchall()]
     else:
         logger.info("🔄 模式：增量更新")
-        changed_paths = [
-            f.absolute_path for f in report.new_files + report.modified_files
-        ]
+        # 修复 M1: 将移动的文件也加入到 changed_paths 中，以便重建 FTS5 索引
+        # 移动文件的 chunks 数据正确（通过 file_id 关联），但 FTS5 索引中的文件名会过时
+        changed_paths = [f.absolute_path for f in report.new_files + report.modified_files + report.moved_files]
 
         if changed_paths:
             placeholders = ",".join(["?"] * len(changed_paths))
@@ -164,9 +172,7 @@ def main():
         """)
         missing_chunks_files = [dict(row) for row in cursor.fetchall()]
         if missing_chunks_files:
-            logger.info(
-                f"⚠️ 发现 {len(missing_chunks_files)} 个文件缺少 chunks，补充索引中..."
-            )
+            logger.info(f"⚠️ 发现 {len(missing_chunks_files)} 个文件缺少 chunks，补充索引中...")
             files_to_index.extend(missing_chunks_files)
 
     if not files_to_index:
@@ -178,18 +184,14 @@ def main():
     all_pending_chunks = []
 
     with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
-        results = executor.map(
-            lambda f: process_file_worker(f, splitter), files_to_index
-        )
+        results = executor.map(lambda f: process_file_worker(f, splitter), files_to_index)
         for f_id, chunks, f_path in results:
             for c in chunks:
                 all_pending_chunks.append((f_id, c, f_path))
 
     # 5. 分批向量化与入库
     total_chunks = len(all_pending_chunks)
-    logger.info(
-        f"🧩 待向量化块总数：{total_chunks}，采用 Batch Size: {args.batch_size}"
-    )
+    logger.info(f"🧩 待向量化块总数：{total_chunks}，采用 Batch Size: {args.batch_size}")
 
     try:
         from tqdm import tqdm
@@ -208,17 +210,19 @@ def main():
         try:
             embeddings = embedder.embed(texts)
         except Exception as e:
-            logger.error(f"❌ 批次向量化失败: {e}")
+            # 修复 M_new1: 记录被跳过的文件列表，而不是静默丢弃
+            skipped_files = [item[2] for item in batch]
+            logger.error(
+                f"❌ 批次向量化失败: {e}，跳过 {len(skipped_files)} 个文件: {skipped_files[:5]}{'...' if len(skipped_files) > 5 else ''}"
+            )
             continue
 
         try:
-            for idx, ((file_id, chunk, f_path), emb) in enumerate(
-                zip(batch, embeddings)
-            ):
+            for idx, ((file_id, chunk, f_path), emb) in enumerate(zip(batch, embeddings)):
+                # 修复 L3: 使用全局序号 processed 而不是批次内序号 idx
+                global_idx = processed + idx
                 try:
-                    metadata_json = json.dumps(
-                        chunk.metadata or {}, ensure_ascii=False, default=json_serialize
-                    )
+                    metadata_json = json.dumps(chunk.metadata or {}, ensure_ascii=False, default=json_serialize)
                 except Exception as e:
                     logger.warning(f"⚠️ metadata 序列化失败，使用空对象：{e}")
                     metadata_json = "{}"
@@ -242,14 +246,14 @@ def main():
                     """,
                     (
                         file_id,
-                        idx,
+                        global_idx,  # 使用全局序号
                         chunk.content,
                         chunk.content_type.value,
                         chunk.section_title,
                         chunk.section_path,
                         chunk.start_pos,
                         chunk.end_pos,
-                        1.0,  # 占位值，实际权重由检索期动态计算
+                        1.0,  # 修复 M_new2: 占位值（已废弃），实际权重由 confidence_json + 检索期动态计算
                         metadata_json,
                         confidence_json,
                     ),

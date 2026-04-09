@@ -139,8 +139,7 @@ class QueryCache:
             return 0
         cutoff = time.time() - self.ttl_seconds
         self._conn.execute("DELETE FROM query_cache WHERE created_at < ?", (cutoff,))
-        cursor = self._conn.execute("SELECT changes()")
-        count = cursor.fetchone()[0]
+        count = self._conn.total_changes
         self._conn.commit()
         if count:
             logger.debug(f"🗑️ 清理过期缓存: {count} 条")
@@ -162,35 +161,12 @@ class QueryCache:
 
 
 _cache_instance: QueryCache | None = None
-_cache_lock = threading.Lock()
 
 
 def get_cache(db_path: str = "./data/cache.db", ttl_seconds: int = 3600, max_entries: int = 1000) -> QueryCache:
-    """获取全局查询缓存实例
-
-    注意：单例模式，第一次调用后参数被缓存，后续调用参数将被忽略。
-
-    Args:
-        db_path: 缓存数据库路径
-        ttl_seconds: 默认过期时间（秒）
-        max_entries: 最大缓存条目数
-
-    Returns:
-        QueryCache 实例
-    """
     global _cache_instance
-    # 修复 M3: 使用锁保护单例创建
-    with _cache_lock:
-        if _cache_instance is None:
-            _cache_instance = QueryCache(db_path, ttl_seconds, max_entries)
-        else:
-            # 修复 M3: 添加警告日志，提示参数被忽略
-            logger.warning(
-                f"⚠️ get_cache() 已存在实例，参数将被忽略。"
-                f"当前实例: db_path={_cache_instance.db_path}, "
-                f"ttl_seconds={_cache_instance.ttl_seconds}, "
-                f"max_entries={_cache_instance.max_entries}"
-            )
+    if _cache_instance is None:
+        _cache_instance = QueryCache(db_path, ttl_seconds, max_entries)
     return _cache_instance
 
 
