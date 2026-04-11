@@ -1,79 +1,48 @@
-# tinyRAG
+# tinyRAG - 轻量级中文 RAG 系统
 
-> 本地知识库检索增强系统，支持混合检索（向量 + 关键词），专为电信行业知识管理设计。
+## 项目简介
 
-[![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/)
-[![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+tinyRAG 是一个轻量级的检索增强生成（RAG）系统，专为中文知识库设计。系统采用向量检索与全文检索（FTS5）双引擎混合架构，支持 Markdown 文档的智能分块、向量化索引和语义检索。
 
-## 🚀 快速开始
+### 核心特性
 
-```bash
-# 克隆项目
-git clone https://github.com/fallleaf/tinyRAG tinyRAG
-cd tinyRAG
+- **混合检索引擎**：向量语义检索 + FTS5 关键词检索双引擎融合，支持 RRF（Reciprocal Rank Fusion）排序
+- **智能 Markdown 分块**：按标题层级、代码块、表格等内容类型智能分割，保留语义完整性
+- **动态置信度权重**：基于文档类型、状态、日期衰减等因素动态计算检索置信度
+- **模型自动卸载**：嵌入模型空闲自动卸载，优化内存占用
+- **增量索引**：两阶段扫描机制，支持文件新增/修改/移动/删除的增量更新
+- **MCP 服务支持**：通过 Model Context Protocol 提供 AI 助手集成能力
 
-# 安装依赖
-pip install -r requirements.txt
+## 系统架构
 
-# 初始化环境
-./init_env.py
-
-# 构建索引
-./build_index.py --force
-
-# 检索测试
-./rag_cli.py search "关键词"
-```
-
-## ✨ 核心功能
-
-- **智能文档解析**: 支持 Markdown 深度解析，自动提取元数据
-- **混合检索引擎**: 向量检索 + 关键词检索，RRF 融合算法
-- **多知识库管理**: 支持多 Vault 配置，类似 Obsidian
-- **MCP 协议支持**: 可与 AI 助手无缝集成
-- **本地化部署**: 数据完全本地存储，隐私安全
-
-## 📚 详细文档
-
-- [📖 项目总览](docs/README.md) - 功能介绍、架构、使用方法
-- [🛠️ 部署指南](docs/DEPLOYMENT.md) - 安装、配置、运维、故障排查
-- [⚡ 快速参考](docs/QUICK_REFERENCE.md) - 命令速查表
-- [📑 文档索引](docs/SUMMARY.md) - 导航所有文档
-
-## 🏗️ 系统架构
-
-```
 tinyRAG/
-├── build_index.py        # 索引构建
-├── rag_cli.py            # CLI 工具
-├── init_env.py           # 环境初始化
-├── config.yaml           # 配置文件
-├── docs/                 # 文档
-├── chunker/              # 文档分块
-├── embedder/             # 向量化
-├── retriever/            # 检索引擎
-├── scanner/              # 文件扫描
-├── storage/              # 数据存储
-├── mcp_server/           # MCP 服务
-└── utils/                # 工具函数
-```
+├── main.py              # 主程序入口（MCP 服务器）
+├── config.py            # 配置管理与校验
+├── build_index.py       # 全量索引构建
+├── rag_cli.py           # 命令行工具
+├── chunker/             # 文档分块模块
+├── embedder/            # 向量化模块
+├── retriever/           # 检索模块
+├── scanner/             # 文件扫描模块
+├── storage/             # 存储模块
+├── utils/               # 工具模块
+└── mcp_server/          # MCP 服务模块
 
-## 🔧 技术栈
+## 快速开始
 
-- **Python 3.10+**: 核心语言
-- **fastembed**: 轻量级嵌入模型
-- **SQLite + sqlite-vec**: 本地向量数据库
-- **Pydantic v2**: 配置校验
-- **loguru**: 日志系统
-- **MCP SDK**: 模型上下文协议
+### 环境要求
+- Python 3.10+
+- SQLite 3.35+（支持 FTS5）
+- 可选：sqlite-vec 扩展
 
-## 📄 许可证
+### 安装依赖
+pip install pydantic pyyaml loguru jieba fastembed mcp tqdm
 
-MIT License - 详见 [LICENSE](LICENSE)
+### 构建索引
+python build_index.py --force  # 全量构建
+python build_index.py          # 增量更新
 
-## 🤝 贡献
+### 命令行检索
+python rag_cli.py search "极简网络" --top-k 5
+python rag_cli.py status
 
-欢迎提交 Issue 和 Pull Request！
-
----
-*最后更新：2026-04-05*

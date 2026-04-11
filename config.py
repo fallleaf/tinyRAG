@@ -48,8 +48,10 @@ class DateDecayConfig(BaseModel):
     """日期衰减配置"""
 
     enabled: bool = True
-    half_life_days: int = 180
+    half_life_days: int = 365  # 默认半衰期 1 年
     min_weight: float = 0.5
+    # 按文档类型差异化衰减（天）
+    type_specific_decay: dict[str, int] = Field(default_factory=dict)
 
 
 class CacheConfig(BaseModel):
@@ -69,26 +71,29 @@ class ConfidenceConfig(BaseModel):
     """置信度与融合权重配置"""
 
     # chunk 内容类型权重 (用于检索期动态计算)
-    type_rules: dict[str, float] = {
-        "code": 1.1,
-        "table": 1.05,
-        "header": 1.0,
-        "text": 0.95,
-        "list": 0.9,
-    }
+    type_rules: dict[str, float] = Field(
+        default_factory=lambda: {
+            "code": 1.1,
+            "table": 1.05,
+            "header": 1.0,
+            "text": 0.95,
+            "list": 0.9,
+        }
+    )
     # 文档类型权重 (Frontmatter doc_type 字段)
-    doc_type_rules: dict[str, float] = {
-        "blog": 1.0,
-        "diary": 1.1,
-        "project": 1.15,
-        "note": 1.0,
-    }
+    # 注意：doc_type_rules 和 status_rules 应在 config.yaml 中定义
+    doc_type_rules: dict[str, float] = Field(default_factory=dict)
     # 文档状态权重 (Frontmatter status 字段)
-    status_rules: dict[str, float] = {
-        "已完成": 1.1,
-        "进行中": 0.9,
-        "草稿": 0.7,
-    }
+    # 5 种基础类型：published, completed, active, draft, archived
+    status_rules: dict[str, float] = Field(
+        default_factory=lambda: {
+            "published": 1.2,
+            "completed": 1.1,
+            "active": 0.9,
+            "draft": 0.7,
+            "archived": 0.5,
+        }
+    )
     # 日期衰减配置
     date_decay: DateDecayConfig = Field(default_factory=DateDecayConfig)
     # 未匹配字段时的默认权重
@@ -115,6 +120,8 @@ class Settings(BaseModel):
     retrieval: dict[str, Any] = {"alpha": 0.7, "beta": 0.3}
     maintenance: dict[str, Any] = {"soft_delete_threshold": 0.2, "auto_vacuum": True}
     cache: CacheConfig = Field(default_factory=CacheConfig)
+    # jieba 用户自定义词典路径（留空则使用默认词典）
+    jieba_user_dict: str = ""
 
     @field_validator("db_path")
     @classmethod

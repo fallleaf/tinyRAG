@@ -37,22 +37,48 @@ confidence:
     header: 1.0
     text: 0.95
     list: 0.9
-  # Frontmatter doc_type 权重 (文档分类)
+  # Frontmatter doc_type 权重 (文档分类 - 5 种基础类型)
+  # 所有文档类型映射到以下 5 种基础类型
   doc_type_rules:
-    blog: 1.0
-    diary: 1.1
-    project: 1.15
-    note: 1.0
-  # Frontmatter status 权重 (任务/项目状态)
+    # 1. official（正式文档）- 政策、标准、正式报告、验收纪要等
+    official: 1.2           # 权重最高，长期有效
+    # 2. project（项目文档）- 项目、计划、工作、会议、报告等
+    project: 1.15           # 权重较高，中期有效
+    # 3. technical（技术文档）- 技术、博客、笔记等
+    technical: 1.1          # 权重较高，长期有效
+    # 4. personal（个人文档）- 日记、闪念、收集、任务等
+    personal: 0.9           # 权重中等，短期有效
+    # 5. archive（归档文档）- 归档、模板、图片、数据等
+    archive: 0.7            # 权重较低，快速衰减
+  # Frontmatter status 权重 (文档状态 - 5 种基础类型)
   status_rules:
-    "已完成": 1.1
-    "进行中": 0.9
-    "草稿": 0.7
+    # 1. published（已发布）- 正式发布的文档
+    "published": 1.2
+    # 2. completed（已完成）- 已完成的任务/项目
+    "completed": 1.1
+    # 3. active（进行中）- 正在进行的工作
+    "active": 0.9
+    # 4. draft（草稿）- 初稿/未完成
+    "draft": 0.7
+    # 5. archived（已归档）- 历史归档/废弃文档
+    "archived": 0.5
   # 日期衰减: 越新的文档权重越高
   date_decay:
     enabled: true
-    half_life_days: 180    # 半衰期(天): 文档超过此天数后权重降为 0.5 × default
+    half_life_days: 365    # 默认半衰期 1 年
     min_weight: 0.5        # 衰减下限
+    # 按文档类型差异化衰减（天）- 5 种基础类型
+    type_specific_decay:
+      # 1. official（正式文档）- 长期有效
+      official: 1825        # 5 年半衰期（政策、标准、正式报告）
+      # 2. project（项目文档）- 中期有效
+      project: 730          # 2 年半衰期（项目、计划、工作、会议、报告）
+      # 3. technical（技术文档）- 长期有效
+      technical: 1095       # 3 年半衰期（技术、博客、笔记）
+      # 4. personal（个人文档）- 短期有效
+      personal: 180         # 6 个月半衰期（日记、闪念、收集、任务）
+      # 5. archive（归档文档）- 快速衰减
+      archive: 90           # 3 个月半衰期（归档、模板、图片、数据）
   # 未匹配时的默认权重
   default_weight: 1.0
 
@@ -67,10 +93,13 @@ maintenance:
 # 缓存配置
 cache:
   db_path: "./data/cache.db"
-  ttl_seconds: 3600        # 缓存过期时间（秒）
+  ttl_seconds: 36000        # 缓存过期时间（秒）
   max_entries: 1000         # 最大缓存条目数
 
 # 检索引擎融合权重 (HybridEngine 读取)
 retrieval:
   alpha: 0.7
   beta: 0.3
+
+# jieba 分词自定义词典（留空则使用默认词典）
+jieba_user_dict: "data/jieba_user_dict.txt"

@@ -97,6 +97,20 @@ class HybridEngine:
             except Exception as e:
                 logger.warning(f"⚠️ 持久化缓存初始化失败，降级为内存缓存: {e}")
 
+        # 加载 jieba 用户自定义词典
+        if JIEBA_AVAILABLE and hasattr(config, "jieba_user_dict") and config.jieba_user_dict:
+            from pathlib import Path
+
+            dict_path = Path(config.jieba_user_dict).expanduser()
+            if dict_path.exists():
+                try:
+                    jieba.load_userdict(str(dict_path))
+                    logger.info(f"✅ jieba 自定义词典加载成功: {dict_path}")
+                except Exception as e:
+                    logger.warning(f"⚠️ jieba 自定义词典加载失败: {e}")
+            else:
+                logger.warning(f"⚠️ jieba 自定义词典文件不存在: {dict_path}")
+
     # ─── 缓存键生成 ───
     def _make_cache_key(
         self,
@@ -244,8 +258,8 @@ class HybridEngine:
         conf_cfg = self.config.confidence
 
         # B. 基础因子提取 (含缺省逻辑)
-        doc_type = data.get("doc_type", "blog")
-        status = data.get("status", "已完成")
+        doc_type = data.get("doc_type", "technical")
+        status = data.get("status", "active")
         final_date_str = data.get("final_date")
 
         dt_w = conf_cfg.doc_type_rules.get(doc_type, 1.0)
@@ -258,8 +272,14 @@ class HybridEngine:
             try:
                 final_dt = datetime.strptime(final_date_str, "%Y-%m-%d")
                 days_passed = (datetime.now() - final_dt).days
+
+                # 根据文档类型选择半衰期
+                half_life = conf_cfg.date_decay.half_life_days  # 默认值
+                if doc_type in conf_cfg.date_decay.type_specific_decay:
+                    half_life = conf_cfg.date_decay.type_specific_decay[doc_type]
+
                 # 指数衰减公式: 2^(-days/half_life)
-                decay = math.pow(0.5, days_passed / conf_cfg.date_decay.half_life_days)
+                decay = math.pow(0.5, days_passed / half_life)
                 date_w = max(conf_cfg.date_decay.min_weight, decay)
             except (ValueError, AttributeError):
                 date_w = conf_cfg.date_decay.min_weight

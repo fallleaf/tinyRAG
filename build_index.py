@@ -1,19 +1,25 @@
 #!/usr/bin/env python3
 """
-build_index.py - tinyRAG 高性能索引构建器
-修复说明:
-1. ✅ 修复 vault_configs 元组访问错误 (v[0] 替代 v.name)
-2. ✅ Pydantic v2 兼容: .dict() → .model_dump()
-3. ✅ 保持语义化 vault_name 与 enabled 过滤逻辑
+build_index.py - tinyRAG 高性能索引构建器 (P0/P1 修复版)
+修复清单:
+1. ✅ P0: 向量化失败不再 continue，改为阻断并明确报错，防止数据错位
+2. ✅ P1: tqdm 与 loguru 终端冲突修复 (tqdm 输出至 stdout)
+3. ✅ 依赖对齐: MarkdownSplitter(config), DatabaseManager(vec_dimension)
+4. ✅ 进度追踪: 失败批次安全回滚，最终统一输出统计
 """
-
 import argparse
+import array
 import json
 import os
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
+
+# 确保项目根目录在 sys.path
+_script_dir = Path(__file__).parent.resolve()
+sys.path.insert(0, str(_script_dir))
 
 import jieba
 
@@ -24,11 +30,8 @@ from scanner.scan_engine import Scanner
 from storage.database import DatabaseManager
 from utils.logger import logger, setup_logger
 
-# 初始化日志
-# 修复 L6: 使用绝对路径，避免依赖 CWD
-_script_dir = Path(__file__).parent.resolve()
+# 初始化日志 (默认输出到 stderr，与 tqdm 的 stdout 互不干扰)
 setup_logger(level="INFO", log_file=str(_script_dir / "logs" / "build_index.log"))
-
 
 def _jieba_segment(text: str) -> str:
     """对中文文本进行 jieba 分词，返回空格拼接的词串"""
@@ -36,59 +39,45 @@ def _jieba_segment(text: str) -> str:
         return ""
     return " ".join(jieba.cut_for_search(text))
 
-
 def prepare_fts_content(chunk, file_path: str) -> str:
     """构建复合检索字符串，所有中文文本字段经 jieba 分词后写入 FTS5"""
     metadata = chunk.metadata or {}
     tags = metadata.get("tags", [])
-    if tags is None:
-        tags = []
-    if isinstance(tags, str):
-        tags = [tags]
+    if tags is None: tags = []
+    if isinstance(tags, str): tags = [tags]
     tag_str = " ".join([f"#{t.strip()}" for t in tags if t])
 
     doc_type = metadata.get("doc_type") or ""
     filename = os.path.basename(file_path)
     section_title = chunk.section_title or ""
 
-    # 对所有含中文的文本字段做 jieba 分词，与检索端保持一致
     parts = [
-        _jieba_segment(filename),
-        _jieba_segment(filename),  # 文件名重复加权
+        _jieba_segment(filename), _jieba_segment(filename),  # 文件名重复加权
         _jieba_segment(chunk.section_path or ""),
-        _jieba_segment(section_title),
-        _jieba_segment(section_title),  # 标题重复加权
-        _jieba_segment(tag_str),
-        _jieba_segment(doc_type),
+        _jieba_segment(section_title), _jieba_segment(section_title),  # 标题重复加权
+        _jieba_segment(tag_str), _jieba_segment(doc_type),
         _jieba_segment(chunk.content),  # 正文分词
     ]
     return " ".join(filter(None, parts)).strip()
 
-
 def json_serialize(obj):
-    """自定义 JSON 序列化器"""
+    """自定义 JSON 序列化器，处理 datetime/date 对象"""
     from datetime import date, datetime
-
     if isinstance(obj, (datetime, date)):
         return obj.isoformat()
     raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
-
 
 def process_file_worker(file_item: dict, splitter: MarkdownSplitter) -> tuple[int, list[Any], str]:
     """并行分块任务单元"""
     abs_path = Path(file_item["absolute_path"])
     try:
         content = abs_path.read_text(encoding="utf-8")
-        # 修复 H_new2: 添加 mtime 防御性检查
         mtime = file_item.get("mtime")
-        if mtime is None:
-            logger.warning(f"⚠️ 文件 {file_item['file_path']} 缺少 mtime，使用当前时间")
         chunks = splitter.split(content, mtime)
         return file_item["id"], chunks, file_item["file_path"]
     except Exception as e:
         logger.error(f"❌ 读取/分块失败：{abs_path} - {e}")
         return file_item["id"], [], file_item["file_path"]
-
 
 def main():
     parser = argparse.ArgumentParser(description="tinyRAG 高性能索引构建器")
@@ -101,15 +90,11 @@ def main():
         config = load_config("config.yaml")
     except Exception as e:
         logger.critical(f"❌ 配置加载失败：{e}")
-        return 1
+        sys.exit(1)
 
-    # 修复 M4: 从 config 读取维度
     db = DatabaseManager(config.db_path, vec_dimension=config.embedding_model.dimensions)
     scanner = Scanner(db)
-
-    # ✅ 修复 B5：MarkdownSplitter 构造函数接收完整 config 对象
     splitter = MarkdownSplitter(config)
-
     embedder = EmbeddingEngine(
         model_name=config.embedding_model.name,
         cache_dir=config.embedding_model.cache_dir,
@@ -117,43 +102,30 @@ def main():
         unload_after_seconds=config.embedding_model.unload_after_seconds,
     )
 
-    # 2.✅ 核心：严格使用 config 中的 name 字段，禁用 v_0/v_1
     vault_configs = [(v.name, v.path) for v in config.vaults if v.enabled]
-
     if not vault_configs:
         logger.warning("⚠️ 未启用任何仓库，跳过扫描")
+        db.close()
         return
 
-    # 📢 明确告知将写入 DB 的 vault_name
-    target_names = [v[0] for v in vault_configs]
-    logger.info(f"📂 将索引以下仓库 (DB vault_name): {target_names}")
-    logger.info(f"📁 对应物理路径: {[v[1] for v in vault_configs]}")
-
-    # 执行扫描
+    logger.info(f"📂 将索引以下仓库: {[v[0] for v in vault_configs]}")
     report = scanner.scan_vaults(vault_configs)
     scanner.process_report(report)
 
-    # 3. 筛选待处理文件
+    # 2. 筛选待处理文件
     files_to_index = []
     if args.force:
         logger.info("🔄 模式：强制重建所有索引")
-        # 修复 H1: 仅删除索引数据，保留 files 表（行 133-134 已正确扫描）
-        # 避免双重扫描和重复 hash 计算
         db.conn.execute("DELETE FROM fts5_index")
         db.conn.execute("DELETE FROM vectors")
         db.conn.execute("DELETE FROM chunks")
-        # 修复 L7: 重置软删除标记，使 force 模式真正重建所有文件
         db.conn.execute("UPDATE files SET is_deleted = 0")
         db.conn.commit()
-        # 直接利用已有 files，无需重新扫描
         cursor = db.conn.execute("SELECT id, absolute_path, file_path, mtime FROM files WHERE is_deleted = 0")
         files_to_index = [dict(row) for row in cursor.fetchall()]
     else:
         logger.info("🔄 模式：增量更新")
-        # 修复 M1: 将移动的文件也加入到 changed_paths 中，以便重建 FTS5 索引
-        # 移动文件的 chunks 数据正确（通过 file_id 关联），但 FTS5 索引中的文件名会过时
         changed_paths = [f.absolute_path for f in report.new_files + report.modified_files + report.moved_files]
-
         if changed_paths:
             placeholders = ",".join(["?"] * len(changed_paths))
             cursor = db.conn.execute(
@@ -162,41 +134,42 @@ def main():
             )
             files_to_index = [dict(row) for row in cursor.fetchall()]
 
-        # 检查缺失 chunks 的文件
+        # 防御性回滚：补充缺失 chunks 的文件
         cursor = db.conn.execute("""
-            SELECT f.id, f.absolute_path, f.file_path, f.mtime
-            FROM files f
-            WHERE f.is_deleted = 0
-            AND NOT EXISTS (SELECT 1 FROM chunks c WHERE c.file_id = f.id)
-            LIMIT 1000
+            SELECT f.id, f.absolute_path, f.file_path, f.mtime FROM files f
+            WHERE f.is_deleted = 0 AND NOT EXISTS (SELECT 1 FROM chunks c WHERE c.file_id = f.id) LIMIT 1000
         """)
-        missing_chunks_files = [dict(row) for row in cursor.fetchall()]
-        if missing_chunks_files:
-            logger.info(f"⚠️ 发现 {len(missing_chunks_files)} 个文件缺少 chunks，补充索引中...")
-            files_to_index.extend(missing_chunks_files)
+        missing = [dict(row) for row in cursor.fetchall()]
+        if missing:
+            logger.info(f"⚠️ 发现 {len(missing)} 个文件缺少 chunks，补充索引中...")
+            files_to_index.extend(missing)
 
     if not files_to_index:
         logger.info("✨ 没有检测到变更，索引已是最新。")
+        db.close()
         return
 
-    # 4. 跨文件分块收集
+    # 3. 跨文件分块收集
     logger.info(f"🚀 开始处理 {len(files_to_index)} 个文件...")
     all_pending_chunks = []
-
     with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
         results = executor.map(lambda f: process_file_worker(f, splitter), files_to_index)
         for f_id, chunks, f_path in results:
             for c in chunks:
                 all_pending_chunks.append((f_id, c, f_path))
 
-    # 5. 分批向量化与入库
     total_chunks = len(all_pending_chunks)
-    logger.info(f"🧩 待向量化块总数：{total_chunks}，采用 Batch Size: {args.batch_size}")
+    if total_chunks == 0:
+        logger.info("✨ 未生成任何有效 chunks。")
+        db.close()
+        return
 
+    # 4. 分批向量化与入库 (🔧 tqdm 与 loguru 冲突修复)
+    logger.info(f"🧩 待向量化块总数：{total_chunks}，Batch Size: {args.batch_size}")
     try:
         from tqdm import tqdm
-
-        pbar = tqdm(total=total_chunks, desc="向量化进度", unit="块")
+        # ✅ 关键：指定 file=sys.stdout，与 loguru 的 stderr 物理隔离
+        pbar = tqdm(total=total_chunks, desc="向量化进度", unit="块", file=sys.stdout, leave=True)
     except ImportError:
         pbar = None
 
@@ -208,95 +181,54 @@ def main():
         texts = [item[1].content for item in batch]
 
         try:
+            # 🔴 P0 修复：向量化失败直接抛出，阻断流程防止数据错位
             embeddings = embedder.embed(texts)
         except Exception as e:
-            # 修复 M_new1: 记录被跳过的文件列表，而不是静默丢弃
-            skipped_files = [item[2] for item in batch]
-            logger.error(
-                f"❌ 批次向量化失败: {e}，跳过 {len(skipped_files)} 个文件: {skipped_files[:5]}{'...' if len(skipped_files) > 5 else ''}"
-            )
-            continue
+            logger.error(f"❌ 批次向量化失败: {e}，中断索引任务以保护数据一致性")
+            if pbar: pbar.close()
+            db.close()
+            sys.exit(1)
 
         try:
             for idx, ((file_id, chunk, f_path), emb) in enumerate(zip(batch, embeddings)):
-                # 修复 L3: 使用全局序号 processed 而不是批次内序号 idx
                 global_idx = processed + idx
-                try:
-                    metadata_json = json.dumps(chunk.metadata or {}, ensure_ascii=False, default=json_serialize)
-                except Exception as e:
-                    logger.warning(f"⚠️ metadata 序列化失败，使用空对象：{e}")
-                    metadata_json = "{}"
-
-                # 序列化置信度原始因子 (供检索期动态计算)
-                try:
-                    confidence_json = json.dumps(
-                        chunk.confidence_metadata or {},
-                        ensure_ascii=False,
-                        default=json_serialize,
-                    )
-                except Exception as e:
-                    logger.warning(f"⚠️ confidence_metadata 序列化失败，使用空对象：{e}")
-                    confidence_json = "{}"
+                metadata_json = json.dumps(chunk.metadata or {}, ensure_ascii=False, default=json_serialize)
+                confidence_json = json.dumps(chunk.confidence_metadata or {}, ensure_ascii=False, default=json_serialize)
 
                 cursor = db.conn.execute(
-                    """
-                    INSERT INTO chunks (file_id, chunk_index, content, content_type, section_title, section_path,
-                    start_pos, end_pos, confidence_final_weight, metadata, confidence_json)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        file_id,
-                        global_idx,  # 使用全局序号
-                        chunk.content,
-                        chunk.content_type.value,
-                        chunk.section_title,
-                        chunk.section_path,
-                        chunk.start_pos,
-                        chunk.end_pos,
-                        1.0,  # 修复 M_new2: 占位值（已废弃），实际权重由 confidence_json + 检索期动态计算
-                        metadata_json,
-                        confidence_json,
-                    ),
+                    """INSERT INTO chunks (file_id, chunk_index, content, content_type, section_title, section_path,
+                       start_pos, end_pos, confidence_final_weight, metadata, confidence_json)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (file_id, global_idx, chunk.content, chunk.content_type.value,
+                     chunk.section_title, chunk.section_path, chunk.start_pos, chunk.end_pos,
+                     1.0, metadata_json, confidence_json)
                 )
                 new_chunk_id = cursor.lastrowid
 
                 if db.vec_support:
-                    import array
+                    db.conn.execute("INSERT INTO vectors (chunk_id, embedding) VALUES (?, ?)",
+                                    (new_chunk_id, array.array("f", emb).tobytes()))
 
-                    db.conn.execute(
-                        "INSERT INTO vectors (chunk_id, embedding) VALUES (?, ?)",
-                        (new_chunk_id, array.array("f", emb).tobytes()),
-                    )
-
-                fts_text = prepare_fts_content(chunk, f_path)
-                db.conn.execute(
-                    "INSERT INTO fts5_index (rowid, content) VALUES (?, ?)",
-                    (new_chunk_id, fts_text),
-                )
+                db.conn.execute("INSERT INTO fts5_index (rowid, content) VALUES (?, ?)",
+                                (new_chunk_id, prepare_fts_content(chunk, f_path)))
 
             db.conn.commit()
             processed += len(batch)
-
             if pbar:
                 pbar.update(len(batch))
-            else:
-                logger.info(f" ✅ 已完成：{processed} / {total_chunks}")
-
         except Exception as e:
             db.conn.rollback()
-            import traceback
-
-            logger.error(f"❌ 批次提交失败：{e}")
-            logger.error(traceback.format_exc())
-            if pbar:
-                pbar.close()
-            raise
+            logger.error(f"❌ 批次提交失败：{e}", exc_info=True)
+            if pbar: pbar.close()
+            db.close()
+            sys.exit(1)
 
     if pbar:
         pbar.close()
 
-    logger.success(f"🎉 索引构建完成！耗时：{time.time() - start_time:.2f}s")
-
+    elapsed = time.time() - start_time
+    logger.success(f"🎉 索引构建完成！成功处理 {processed}/{total_chunks} 个 Chunk，耗时：{elapsed:.2f}s")
+    db.close()
 
 if __name__ == "__main__":
     main()

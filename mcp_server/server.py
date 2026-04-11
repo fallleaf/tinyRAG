@@ -299,7 +299,8 @@ class ScanTool(BaseTool):
             mtime = file_item.get("mtime")
             if mtime is None:
                 logger.warning(f"⚠️ 文件 {file_item['file_path']} 缺少 mtime，使用当前时间")
-            chunks = splitter.split(content, mtime)
+            # ✅ 修复：传入正确的 file_path 参数
+            chunks = splitter.split(content, file_path=file_item.get("file_path", ""))
             return file_item["id"], chunks, file_item["file_path"]
         except Exception as e:
             logger.error(f"❌ 读取/分块失败：{abs_path} - {e}")
