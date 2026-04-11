@@ -2,13 +2,27 @@
 # tinyRAG 核心配置文件
 
 # 知识库仓库路径 (支持多个)
+# 每个仓库可配置独立的排除规则，未配置则使用全局 exclude
 vaults:
   - path: "~/NanobotMemory"
     name: personal
     enabled: true
+    # exclude:  # 可选：per-vault 排除规则（与全局规则合并）
+    #  dirs:
+    #     - "archive"
+    #     - "drafts"
+    #   patterns:
+    #     - "*/private/*"
   - path: "~/Obsidian"
     name: work
-    enabled: false
+    enabled: true
+    exclude:  # 可选：per-vault 排除规则
+      dirs:
+        - "98.附件"
+        - "copilot"
+        - "Excalidraw"
+    #   patterns:
+    #     - "*draft*"
 
 # 数据库配置
 db_path: "./data/rag.db"
@@ -28,29 +42,43 @@ chunking:
   overlap: 50
 
 # 流式处理配置（内存优化）
-stream_batch_size: 256  # 每累积多少 chunks 进行一次向量化入库
+stream_batch_size: 128  # 每累积多少 chunks 进行一次向量化入库
 max_concurrent_files: 2  # 并行处理文件数的上限，低内存设备建议设为 1-2
 
-# 置信度与融合权重
+# 置信度与融合权重 (v2.0 - Frontmatter 驱动)
+# 权重计算: final_weight = doc_type_weight × status_weight × date_weight
+# 未匹配字段使用 default_weight
 confidence:
+  # chunk 内容类型权重 (用于检索期动态计算)
   type_rules:
     code: 1.1
     table: 1.05
     header: 1.0
     text: 0.95
     list: 0.9
+  # Frontmatter doc_type 权重 (文档分类 - 5 种基础类型)
   doc_type_rules:
     official: 1.2
-    project: 1.15
+    project: 1.00
     technical: 1.1
     personal: 0.9
     archive: 0.7
+  # Frontmatter status 权重 (文档状态 - 5 种基础类型)
   status_rules:
     "published": 1.2
     "completed": 1.1
     "active": 0.9
     "draft": 0.7
     "archived": 0.5
+
+    # 🔧 新增：中文状态别名（兼容旧数据）
+    "已完成": 1.1
+    "进行中": 0.9
+    "草稿": 0.7
+    "已归档": 0.5
+    "已发布": 1.2
+
+  # 日期衰减: 越新的文档权重越高
   date_decay:
     enabled: true
     half_life_days: 365
@@ -63,19 +91,39 @@ confidence:
       archive: 90
   default_weight: 1.0
 
+# 日志级别
 log_level: "INFO"
 
+# 数据库维护策略
 maintenance:
   soft_delete_threshold: 0.2
   auto_vacuum: true
 
+# 缓存配置
 cache:
   db_path: "./data/cache.db"
   ttl_seconds: 36000
   max_entries: 1000
 
+# 检索引擎融合权重
 retrieval:
   alpha: 0.7
   beta: 0.3
 
+# jieba 分词自定义词典
 jieba_user_dict: "data/jieba_user_dict.txt"
+
+# 全局扫描排除规则（作为默认值，与 per-vault 规则合并）
+exclude:
+  dirs:
+    - ".git"
+    - ".obsidian"
+    - ".trash"
+    - ".Trash"
+    - "node_modules"
+    - "__pycache__"
+    - ".venv"
+    - "venv"
+    - ".idea"
+    - ".vscode"
+  patterns: []

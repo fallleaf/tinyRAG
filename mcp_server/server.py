@@ -1,26 +1,17 @@
 #!/usr/bin/env python3
 """
-mcp_server/server.py - Production MCP RAG Server (v2.1)
+mcp_server/server.py - Production MCP RAG Server (v3.2)
 
-v2.1 修复内容:
-- S1: HybridRetriever → HybridEngine 类名修复
-- S2: HybridEngine 构造函数签名对齐 (config, db, embed_engine)
-- S3: MarkdownSplitter 构造函数签名对齐 (config 对象)
-- S4: SearchTool.search() 调用参数对齐 (query, limit, vault_filter)
+v3.2 修复内容:
+- F1: read_resource 的 uri 参数是 AnyUrl 类型，需要转换为字符串
+- F2: _prompt_summarize_document 路径匹配策略改进
+  - 精确匹配相对路径 (file_path) 优先
+  - 支持绝对路径精确匹配 (absolute_path)
+  - 后缀模糊匹配作为备选，避免匹配到错误文件
 
-v2.0 优化内容:
-1.  P0-1: MarkdownSplitter 传递 confidence_config (frontmatter 权重)
-2.  P0-2: ScanTool 使用 config 中的真实 vault_name (不再用 v_0/v_1)
-3.  P0-3: RebuildTool 使用 asyncio.to_thread 避免阻塞事件循环
-4.  P0-4: ScanTool 返回 touched_files 计数
-5.  P1-1: mcp_safe 不再向客户端暴露完整 traceback
-6.  P1-2: _load_build_index_main 使用独立命名空间避免 sys.modules 污染
-7.  P1-3: initialize() 局部变量模式 + 失败时清理部分初始化的资源
-8.  P1-4: add_background_task 回调使用 try/except 避免竞态崩溃
-9.  P1-5: shutdown() 安全关闭数据库连接
-10. P2-1: BaseTool.run() 补充类型注解
-11. P2-2: RebuildTool 支持 batch_size 参数
-12. P2-3: ToolRegistry.execute 添加 default=str 序列化兜底 + 移除 indent
+v3.0 新增内容:
+1. ✅ Resources 接口：暴露知识库统计信息、文档内容
+2. ✅ Prompts 接口：预定义检索增强提示词模板
 """
 
 import asyncio
@@ -36,18 +27,27 @@ from typing import Any, ClassVar
 
 from utils.logger import setup_logger
 
-# MCP
+# MCP - 导入所有需要的类型
 try:
     from mcp.server import Server
     from mcp.server.stdio import stdio_server
-    from mcp.types import TextContent, Tool
+    from mcp.types import (
+        TextContent,
+        Tool,
+        Resource,
+        ResourceTemplate,
+        Prompt,
+        PromptArgument,
+        PromptMessage,
+        GetPromptResult,
+    )
 
     MCP_AVAILABLE = True
 except ImportError:
     MCP_AVAILABLE = False
 
 from chunker.markdown_splitter import MarkdownSplitter
-from config import Settings, load_config
+from config import Settings, get_merged_exclude, load_config
 from embedder.embed_engine import EmbeddingEngine
 from retriever.hybrid_engine import HybridEngine
 from scanner.scan_engine import Scanner
@@ -60,16 +60,10 @@ PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 log_file = PROJECT_ROOT / "logs" / "mcp_server.log"
 logger = setup_logger(level="INFO", log_file=str(log_file))
 
-# build_index 模块的唯一命名空间键，避免与用户代码的 import 冲突
 _BUILD_INDEX_MODULE_KEY = "_tinyrag_build_index"
 
 
 def _load_build_index_main():
-    """
-    安全加载 build_index 模块。
-    使用唯一命名空间键注册到 sys.modules，生命周期与服务器一致。
-    首次加载后缓存，后续调用直接返回缓存的 main 函数。
-    """
     if _BUILD_INDEX_MODULE_KEY in sys.modules:
         return sys.modules[_BUILD_INDEX_MODULE_KEY].main
 
@@ -88,42 +82,44 @@ def _load_build_index_main():
 # App Context
 # =====================
 class AppContext:
-    """
-    应用上下文容器：统一管理配置、数据库、扫描器、检索器、分块器的生命周期。
-    使用双重检查锁定确保异步安全初始化，局部变量模式防止部分失败时的资源泄漏。
-    """
-
     def __init__(self):
         self.config: Settings | None = None
         self.db: DatabaseManager | None = None
         self.scanner: Scanner | None = None
         self.retriever: HybridEngine | None = None
         self.splitter: MarkdownSplitter | None = None
+        self.vault_excludes: dict[str, tuple[frozenset[str], list[str]]] = {}
         self._initialized = False
         self._lock = asyncio.Lock()
         self._background_tasks: list[asyncio.Task] = []
 
     async def initialize(self):
-        """异步初始化所有组件。幂等，可安全重复调用。"""
         if self._initialized:
             return
         async with self._lock:
             if self._initialized:
                 return
 
-        # ── 局部变量模式：全部成功后才赋值到 self，失败时清理中间资源 ──
         config = None
         db = None
         scanner = None
         retriever = None
         splitter = None
+        vault_excludes = {}
         try:
             config_path = PROJECT_ROOT / "config.yaml"
             config = load_config(str(config_path))
 
-            # 修复 M4: 从 config 读取维度
             db = DatabaseManager(config.db_path, vec_dimension=config.embedding_model.dimensions)
-            scanner = Scanner(db)
+
+            global_skip_dirs = frozenset(config.exclude.dirs) if hasattr(config, "exclude") else frozenset()
+            global_exclude_patterns = config.exclude.patterns if hasattr(config, "exclude") else []
+            scanner = Scanner(db, skip_dirs=global_skip_dirs, exclude_patterns=global_exclude_patterns)
+
+            for v in config.vaults:
+                if v.enabled:
+                    merged = get_merged_exclude(v, config.exclude)
+                    vault_excludes[v.name] = (frozenset(merged.dirs), merged.patterns)
 
             embed_engine = EmbeddingEngine(
                 model_name=config.embedding_model.name,
@@ -132,25 +128,18 @@ class AppContext:
                 unload_after_seconds=config.embedding_model.unload_after_seconds,
             )
 
-            retriever = HybridEngine(
-                config=config,
-                db=db,
-                embed_engine=embed_engine,
-            )
-
-            # P0-1: 传递完整 config 对象，使分块器与置信度系统生效
+            retriever = HybridEngine(config=config, db=db, embed_engine=embed_engine)
             splitter = MarkdownSplitter(config)
 
-            # 全部成功，赋值到 self
             self.config = config
             self.db = db
             self.scanner = scanner
             self.retriever = retriever
             self.splitter = splitter
+            self.vault_excludes = vault_excludes
             self._initialized = True
             logger.info("MCP components initialized successfully")
         except Exception:
-            # P1-3: 清理部分初始化的资源，防止连接泄漏
             if db is not None:
                 with contextlib.suppress(Exception):
                     db.close()
@@ -158,18 +147,15 @@ class AppContext:
             raise
 
     def add_background_task(self, task: asyncio.Task):
-        """注册后台任务，完成后自动从列表移除。"""
         self._background_tasks.append(task)
 
         def _on_done(t: asyncio.Task):
-            # P1-4: 防止竞态条件下重复 remove 导致 ValueError
             with contextlib.suppress(ValueError):
                 self._background_tasks.remove(t)
 
         task.add_done_callback(_on_done)
 
     async def shutdown(self):
-        """优雅关闭：取消后台任务 + 关闭数据库连接。"""
         logger.info("Shutting down server...")
         if self._background_tasks:
             for t in self._background_tasks:
@@ -177,7 +163,6 @@ class AppContext:
             await asyncio.gather(*self._background_tasks, return_exceptions=True)
             self._background_tasks.clear()
 
-        # P1-5: 安全关闭数据库连接
         if self.db:
             try:
                 self.db.close()
@@ -190,32 +175,17 @@ class AppContext:
 # Error Wrapper & Tool Base
 # =====================
 def mcp_safe(func: Callable[..., Awaitable[list[TextContent]]]):
-    """
-    工具执行错误包装器。
-    P1-1: 仅向客户端返回简短错误信息，完整 traceback 仅记录到服务端日志。
-    """
-
     async def wrapper(*args, **kwargs):
         try:
             return await func(*args, **kwargs)
         except Exception as e:
             logger.error(f"Tool error: {e}", exc_info=True)
-            return [
-                TextContent(
-                    type="text",
-                    text=json.dumps(
-                        {"error": str(e)},
-                        ensure_ascii=False,
-                    ),
-                )
-            ]
+            return [TextContent(type="text", text=json.dumps({"error": str(e)}, ensure_ascii=False))]
 
     return wrapper
 
 
 class BaseTool:
-    """MCP 工具基类。子类需定义 name/description/schema 并实现 run()。"""
-
     name: str
     description: str
     schema: dict[str, Any]
@@ -223,7 +193,6 @@ class BaseTool:
     def __init__(self, ctx: AppContext):
         self.ctx = ctx
 
-    # P2-1: 补充类型注解
     async def run(self, args: dict[str, Any]) -> dict[str, Any]:
         raise NotImplementedError
 
@@ -231,6 +200,9 @@ class BaseTool:
         return Tool(name=self.name, description=self.description, inputSchema=self.schema)
 
 
+# =====================
+# Tools
+# =====================
 class SearchTool(BaseTool):
     name, description = "search", "Hybrid knowledge retrieval with RRF fusion (tinyRAG)"
     schema: ClassVar[dict] = {
@@ -247,24 +219,18 @@ class SearchTool(BaseTool):
         "required": ["query"],
     }
 
-    # P2-3: 补充参数类型注解
     async def run(self, args: dict[str, Any]) -> dict[str, Any]:
         await self.ctx.initialize()
         query = args.get("query", "")
         mode = args.get("mode", "hybrid")
         top_k = min(max(args.get("top_k", 10), 1), 100)
 
-        # 修复 H1 + M2: 不直接修改 config，使用局部变量传递 alpha/beta
-        # 通过 alpha/beta 比值模拟检索模式
         if mode == "keyword":
-            alpha = 0.0
-            beta = 1.0
+            alpha, beta = 0.0, 1.0
         elif mode == "semantic":
-            alpha = 1.0
-            beta = 0.0
-        else:  # hybrid 模式，使用默认值
-            alpha = None
-            beta = None
+            alpha, beta = 1.0, 0.0
+        else:
+            alpha, beta = None, None
 
         results = await asyncio.to_thread(self.ctx.retriever.search, query, limit=top_k, alpha=alpha, beta=beta)
         return {
@@ -278,6 +244,7 @@ class SearchTool(BaseTool):
                     "content": r.content[:300],
                     "score": round(r.final_score, 4),
                     "confidence": round(r.confidence_score, 4),
+                    "confidence_reason": r.confidence_reason,
                 }
                 for i, r in enumerate(results)
             ],
@@ -285,21 +252,14 @@ class SearchTool(BaseTool):
 
 
 class ScanTool(BaseTool):
-    name, description = (
-        "scan_index",
-        "Incrementally scan and update file index (tinyRAG)",
-    )
+    name, description = "scan_index", "Incrementally scan and update file index (tinyRAG)"
     schema: ClassVar[dict] = {"type": "object", "properties": {}}
 
     def _process_file_worker(self, file_item: dict, splitter: MarkdownSplitter) -> tuple[int, list, str]:
-        """并行分块任务单元"""
         abs_path = Path(file_item["absolute_path"])
         try:
             content = abs_path.read_text(encoding="utf-8")
             mtime = file_item.get("mtime")
-            if mtime is None:
-                logger.warning(f"⚠️ 文件 {file_item['file_path']} 缺少 mtime，使用当前时间")
-            # ✅ 修复：传入正确的 file_path 参数
             chunks = splitter.split(content, file_path=file_item.get("file_path", ""))
             return file_item["id"], chunks, file_item["file_path"]
         except Exception as e:
@@ -307,8 +267,9 @@ class ScanTool(BaseTool):
             return file_item["id"], [], file_item["file_path"]
 
     async def _index_changed_files(self, changed_paths: list[str]) -> None:
-        """为变更的文件创建 chunks 和向量（复用 build_index 逻辑）"""
-        # 1. 查询文件列表
+        if not changed_paths:
+            return
+
         placeholders = ",".join(["?"] * len(changed_paths))
         cursor = self.ctx.db.conn.execute(
             f"SELECT id, absolute_path, file_path, mtime FROM files WHERE absolute_path IN ({placeholders})",
@@ -317,12 +278,8 @@ class ScanTool(BaseTool):
         files_to_index = [dict(row) for row in cursor.fetchall()]
 
         if not files_to_index:
-            logger.info("✨ 没有需要索引的文件")
             return
 
-        logger.info(f"🚀 开始为 {len(files_to_index)} 个变更文件创建 chunks 和向量...")
-
-        # 2. 分块（使用线程池避免阻塞）
         all_pending_chunks = []
         with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
             results = executor.map(
@@ -334,74 +291,39 @@ class ScanTool(BaseTool):
                     all_pending_chunks.append((f_id, c, f_path))
 
         if not all_pending_chunks:
-            logger.info("✨ 没有生成任何 chunks")
             return
 
-        # 3. 分批向量化与入库（流式处理）
-        total_chunks = len(all_pending_chunks)
         batch_size = self.ctx.config.embedding_model.batch_size
-        stream_batch_size = self.ctx.config.stream_batch_size
-        logger.info(f"🧩 待向量化块总数：{total_chunks}，Batch Size: {batch_size}")
-
         processed = 0
-        for i in range(0, total_chunks, batch_size):
+
+        for i in range(0, len(all_pending_chunks), batch_size):
             batch = all_pending_chunks[i : i + batch_size]
             texts = [item[1].content for item in batch]
 
             try:
                 embeddings = await asyncio.to_thread(self.ctx.retriever.embed_engine.embed, texts)
             except Exception as e:
-                skipped_files = [item[2] for item in batch]
-                logger.error(
-                    f"❌ 批次向量化失败: {e}，跳过 {len(skipped_files)} 个文件: {skipped_files[:5]}{'...' if len(skipped_files) > 5 else ''}"
-                )
+                logger.error(f"❌ 批次向量化失败: {e}")
                 continue
 
             try:
                 for idx, ((file_id, chunk, f_path), emb) in enumerate(zip(batch, embeddings)):
                     global_idx = processed + idx
-                    try:
-                        metadata_json = json.dumps(chunk.metadata or {}, ensure_ascii=False, default=_json_serialize)
-                    except Exception as e:
-                        logger.warning(f"⚠️ metadata 序列化失败，使用空对象：{e}")
-                        metadata_json = "{}"
-
-                    # 序列化置信度原始因子
-                    try:
-                        confidence_json = json.dumps(
-                            chunk.confidence_metadata or {},
-                            ensure_ascii=False,
-                            default=_json_serialize,
-                        )
-                    except Exception as e:
-                        logger.warning(f"⚠️ confidence_metadata 序列化失败，使用空对象：{e}")
-                        confidence_json = "{}"
+                    metadata_json = json.dumps(chunk.metadata or {}, ensure_ascii=False, default=_json_serialize)
+                    confidence_json = json.dumps(chunk.confidence_metadata or {}, ensure_ascii=False, default=_json_serialize)
 
                     cursor = self.ctx.db.conn.execute(
-                        """
-                        INSERT INTO chunks (file_id, chunk_index, content, content_type, section_title, section_path,
+                        """INSERT INTO chunks (file_id, chunk_index, content, content_type, section_title, section_path,
                         start_pos, end_pos, confidence_final_weight, metadata, confidence_json)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            file_id,
-                            global_idx,
-                            chunk.content,
-                            chunk.content_type.value,
-                            chunk.section_title,
-                            chunk.section_path,
-                            chunk.start_pos,
-                            chunk.end_pos,
-                            1.0,  # 占位值（已废弃），实际权重由 confidence_json + 检索期动态计算
-                            metadata_json,
-                            confidence_json,
-                        ),
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (file_id, global_idx, chunk.content, chunk.content_type.value,
+                         chunk.section_title, chunk.section_path, chunk.start_pos, chunk.end_pos,
+                         1.0, metadata_json, confidence_json),
                     )
                     new_chunk_id = cursor.lastrowid
 
                     if self.ctx.db.vec_support:
                         import array
-
                         self.ctx.db.conn.execute(
                             "INSERT INTO vectors (chunk_id, embedding) VALUES (?, ?)",
                             (new_chunk_id, array.array("f", emb).tobytes()),
@@ -415,29 +337,24 @@ class ScanTool(BaseTool):
 
                 self.ctx.db.conn.commit()
                 processed += len(batch)
-                logger.info(f" ✅ 已完成：{processed} / {total_chunks}")
 
             except Exception as e:
                 self.ctx.db.conn.rollback()
-                logger.error(f"❌ 批次提交失败：{e}", exc_info=True)
+                logger.error(f"❌ 批次提交失败：{e}")
                 raise
 
         logger.success(f"🎉 增量索引完成！共处理 {processed} 个 chunks")
 
-    # P2-3: 补充参数类型注解
     async def run(self, args: dict[str, Any]) -> dict[str, Any]:
         await self.ctx.initialize()
-        # P0-2: 使用 config 中的真实 vault_name (personal/work)，不再用 v_0/v_1
         vault_configs = [(v.name, v.path) for v in self.ctx.config.vaults if v.enabled]
-        report = await asyncio.to_thread(self.ctx.scanner.scan_vaults, vault_configs)
+        report = await asyncio.to_thread(
+            self.ctx.scanner.scan_vaults, vault_configs, self.ctx.vault_excludes
+        )
         await asyncio.to_thread(self.ctx.scanner.process_report, report)
 
-        # 🆕 增量索引：为新增、修改、移动的文件创建 chunks 和向量
-        changed_paths = []
-        for f in report.new_files + report.modified_files:
-            changed_paths.append(f.absolute_path)
-        for f in report.moved_files:
-            changed_paths.append(f.new_absolute_path)
+        changed_paths = [f.absolute_path for f in report.new_files + report.modified_files]
+        changed_paths.extend([f.new_absolute_path for f in report.moved_files])
         if changed_paths:
             await self._index_changed_files(changed_paths)
 
@@ -456,25 +373,18 @@ class RebuildTool(BaseTool):
     name, description = "rebuild_index", "Force rebuild full knowledge index (tinyRAG)"
     schema: ClassVar[dict] = {"type": "object", "properties": {}}
 
-    # P2-3: 补充参数类型注解
     async def run(self, args: dict[str, Any]) -> dict[str, Any]:
         task = asyncio.create_task(self._background_job(args))
         self.ctx.add_background_task(task)
         return {"status": "started", "message": "Index rebuild running in background"}
 
     async def _background_job(self, args: dict[str, Any]):
-        """后台执行索引重建，通过 asyncio.to_thread 避免阻塞事件循环。"""
         try:
             await self.ctx.initialize()
             logger.info("Starting background index rebuild...")
             build_main = _load_build_index_main()
-
-            # v2.0: batch_size 从 config 读取，不再通过参数传递
             import argparse
-
             build_args = argparse.Namespace(force=True)
-
-            # P0-3: asyncio.to_thread 防止同步 build_main 阻塞事件循环
             await asyncio.to_thread(build_main, build_args)
             logger.info("Index rebuild completed successfully")
         except Exception as e:
@@ -483,19 +393,458 @@ class RebuildTool(BaseTool):
 
 
 # =====================
-# Helper Functions for Incremental Indexing
+# Resources 实现
+# =====================
+class ResourceManager:
+    """MCP Resources 管理器"""
+
+    def __init__(self, ctx: AppContext):
+        self.ctx = ctx
+
+    def list_resources(self) -> list[Resource]:
+        return [
+            Resource(
+                uri="tinyrag://stats",
+                name="Knowledge Base Statistics",
+                description="知识库统计信息：文件数、分块数、vault 配置等",
+                mimeType="application/json",
+            ),
+            Resource(
+                uri="tinyrag://config",
+                name="tinyRAG Configuration",
+                description="当前配置信息：模型、权重、排除规则等",
+                mimeType="application/json",
+            ),
+        ]
+
+    def list_resource_templates(self) -> list[ResourceTemplate]:
+        return [
+            ResourceTemplate(
+                uriTemplate="tinyrag://vault/{vault_name}",
+                name="Vault Statistics",
+                description="指定 vault 的统计信息",
+                mimeType="application/json",
+            ),
+            ResourceTemplate(
+                uriTemplate="tinyrag://file/{file_id}",
+                name="File Content",
+                description="获取指定文件的完整内容和元数据",
+                mimeType="application/json",
+            ),
+            ResourceTemplate(
+                uriTemplate="tinyrag://chunks/{file_id}",
+                name="File Chunks",
+                description="获取指定文件的所有分块",
+                mimeType="application/json",
+            ),
+        ]
+
+    async def read_resource(self, uri: Any) -> str:
+        """
+        读取资源内容
+        注意：uri 参数是 AnyUrl 类型，需要转换为字符串
+        """
+        await self.ctx.initialize()
+
+        # 🔧 F1: 将 AnyUrl 转换为字符串
+        uri_str = str(uri)
+
+        # 静态资源
+        if uri_str == "tinyrag://stats":
+            return self._get_stats()
+
+        if uri_str == "tinyrag://config":
+            return self._get_config()
+
+        # 模板资源：tinyrag://vault/{vault_name}
+        if uri_str.startswith("tinyrag://vault/"):
+            vault_name = uri_str.split("/")[-1]
+            return self._get_vault_stats(vault_name)
+
+        # 模板资源：tinyrag://file/{file_id}
+        if uri_str.startswith("tinyrag://file/"):
+            file_id = uri_str.split("/")[-1]
+            return self._get_file_content(file_id)
+
+        # 模板资源：tinyrag://chunks/{file_id}
+        if uri_str.startswith("tinyrag://chunks/"):
+            file_id = uri_str.split("/")[-1]
+            return self._get_file_chunks(file_id)
+
+        raise ValueError(f"Unknown resource URI: {uri_str}")
+
+    def _get_stats(self) -> str:
+        db = self.ctx.db
+
+        files_total = db.conn.execute("SELECT COUNT(*) FROM files WHERE is_deleted = 0").fetchone()[0]
+        files_by_vault = db.conn.execute(
+            "SELECT vault_name, COUNT(*) as cnt FROM files WHERE is_deleted = 0 GROUP BY vault_name"
+        ).fetchall()
+
+        chunks_total = db.conn.execute("SELECT COUNT(*) FROM chunks WHERE is_deleted = 0").fetchone()[0]
+        vectors_total = db.conn.execute("SELECT COUNT(*) FROM vectors").fetchone()[0]
+
+        db_size = os.path.getsize(self.ctx.config.db_path) if self.ctx.config.db_path else 0
+
+        stats = {
+            "files": {
+                "total": files_total,
+                "by_vault": {row["vault_name"]: row["cnt"] for row in files_by_vault},
+            },
+            "chunks": {
+                "total": chunks_total,
+                "avg_per_file": round(chunks_total / max(files_total, 1), 1),
+            },
+            "vectors": {
+                "total": vectors_total,
+                "dimensions": self.ctx.config.embedding_model.dimensions,
+            },
+            "storage": {
+                "db_size_mb": round(db_size / 1024 / 1024, 2),
+                "db_path": self.ctx.config.db_path,
+            },
+            "model": {
+                "name": self.ctx.config.embedding_model.name,
+                "size": self.ctx.config.embedding_model.size,
+            },
+        }
+
+        return json.dumps(stats, ensure_ascii=False, indent=2)
+
+    def _get_config(self) -> str:
+        cfg = self.ctx.config
+
+        config_info = {
+            "vaults": [
+                {
+                    "name": v.name,
+                    "path": v.path,
+                    "enabled": v.enabled,
+                    "exclude": v.exclude.model_dump() if v.exclude else None,
+                }
+                for v in cfg.vaults
+            ],
+            "embedding_model": {
+                "name": cfg.embedding_model.name,
+                "dimensions": cfg.embedding_model.dimensions,
+                "batch_size": cfg.embedding_model.batch_size,
+            },
+            "chunking": cfg.chunking,
+            "confidence": {
+                "doc_type_rules": cfg.confidence.doc_type_rules,
+                "status_rules": cfg.confidence.status_rules,
+                "date_decay": {
+                    "enabled": cfg.confidence.date_decay.enabled,
+                    "half_life_days": cfg.confidence.date_decay.half_life_days,
+                    "type_specific": cfg.confidence.date_decay.type_specific_decay,
+                },
+            },
+            "retrieval": cfg.retrieval,
+            "exclude": cfg.exclude.model_dump(),
+        }
+
+        return json.dumps(config_info, ensure_ascii=False, indent=2)
+
+    def _get_vault_stats(self, vault_name: str) -> str:
+        db = self.ctx.db
+
+        files_count = db.conn.execute(
+            "SELECT COUNT(*) FROM files WHERE vault_name = ? AND is_deleted = 0", (vault_name,)
+        ).fetchone()[0]
+
+        chunks_count = db.conn.execute(
+            "SELECT COUNT(*) FROM chunks c JOIN files f ON c.file_id = f.id WHERE f.vault_name = ? AND c.is_deleted = 0",
+            (vault_name,),
+        ).fetchone()[0]
+
+        recent_files = db.conn.execute(
+            """SELECT file_path, mtime, file_size FROM files 
+               WHERE vault_name = ? AND is_deleted = 0 
+               ORDER BY updated_at DESC LIMIT 10""",
+            (vault_name,),
+        ).fetchall()
+
+        doc_types = db.conn.execute(
+            """SELECT json_extract(confidence_json, '$.doc_type') as doc_type, COUNT(*) as cnt 
+               FROM chunks c JOIN files f ON c.file_id = f.id 
+               WHERE f.vault_name = ? AND c.is_deleted = 0 
+               GROUP BY doc_type""",
+            (vault_name,),
+        ).fetchall()
+
+        stats = {
+            "vault_name": vault_name,
+            "files_count": files_count,
+            "chunks_count": chunks_count,
+            "recent_files": [
+                {"path": row["file_path"], "mtime": row["mtime"], "size": row["file_size"]}
+                for row in recent_files
+            ],
+            "doc_type_distribution": {row["doc_type"] or "unknown": row["cnt"] for row in doc_types},
+        }
+
+        return json.dumps(stats, ensure_ascii=False, indent=2)
+
+    def _get_file_content(self, file_id: str) -> str:
+        try:
+            fid = int(file_id)
+        except ValueError:
+            return json.dumps({"error": "Invalid file_id, must be integer"})
+
+        row = self.ctx.db.conn.execute(
+            """SELECT f.id, f.vault_name, f.file_path, f.absolute_path, f.file_hash, f.mtime, f.file_size
+               FROM files f WHERE f.id = ? AND f.is_deleted = 0""",
+            (fid,),
+        ).fetchone()
+
+        if not row:
+            return json.dumps({"error": f"File not found: {file_id}"})
+
+        try:
+            with open(row["absolute_path"], "r", encoding="utf-8") as f:
+                content = f.read()
+        except Exception as e:
+            content = f"[Error reading file: {e}]"
+
+        file_info = {
+            "id": row["id"],
+            "vault_name": row["vault_name"],
+            "file_path": row["file_path"],
+            "absolute_path": row["absolute_path"],
+            "file_hash": row["file_hash"],
+            "mtime": row["mtime"],
+            "file_size": row["file_size"],
+            "content": content[:10000],
+            "content_truncated": len(content) > 10000,
+        }
+
+        return json.dumps(file_info, ensure_ascii=False, indent=2)
+
+    def _get_file_chunks(self, file_id: str) -> str:
+        try:
+            fid = int(file_id)
+        except ValueError:
+            return json.dumps({"error": "Invalid file_id, must be integer"})
+
+        chunks = self.ctx.db.conn.execute(
+            """SELECT c.id, c.chunk_index, c.content, c.content_type, c.section_title, 
+                      c.section_path, c.confidence_json
+               FROM chunks c WHERE c.file_id = ? AND c.is_deleted = 0 
+               ORDER BY c.chunk_index""",
+            (fid,),
+        ).fetchall()
+
+        if not chunks:
+            return json.dumps({"error": f"No chunks found for file: {file_id}"})
+
+        result = {
+            "file_id": fid,
+            "total_chunks": len(chunks),
+            "chunks": [
+                {
+                    "id": row["id"],
+                    "index": row["chunk_index"],
+                    "type": row["content_type"],
+                    "section": row["section_title"],
+                    "section_path": row["section_path"],
+                    "content": row["content"][:500],
+                    "confidence": json.loads(row["confidence_json"] or "{}"),
+                }
+                for row in chunks
+            ],
+        }
+
+        return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+# =====================
+# Prompts 实现
+# =====================
+class PromptManager:
+    """MCP Prompts 管理器"""
+
+    def __init__(self, ctx: AppContext):
+        self.ctx = ctx
+
+    def list_prompts(self) -> list[Prompt]:
+        return [
+            Prompt(
+                name="search_with_context",
+                description="基于知识库检索结果回答问题的提示词模板",
+                arguments=[
+                    PromptArgument(
+                        name="query",
+                        description="用户的问题或查询",
+                        required=True,
+                    ),
+                    PromptArgument(
+                        name="top_k",
+                        description="检索结果数量，默认 5",
+                        required=False,
+                    ),
+                ],
+            ),
+            Prompt(
+                name="summarize_document",
+                description="总结指定文档核心内容的提示词模板",
+                arguments=[
+                    PromptArgument(
+                        name="file_path",
+                        description="文档路径（相对路径）",
+                        required=True,
+                    ),
+                ],
+            ),
+        ]
+
+    async def get_prompt(self, name: str, arguments: dict[str, str]) -> GetPromptResult:
+        await self.ctx.initialize()
+
+        if name == "search_with_context":
+            return self._prompt_search_with_context(arguments)
+        elif name == "summarize_document":
+            return self._prompt_summarize_document(arguments)
+        else:
+            raise ValueError(f"Unknown prompt: {name}")
+
+    def _prompt_search_with_context(self, args: dict[str, str]) -> GetPromptResult:
+        query = args.get("query", "")
+        top_k = int(args.get("top_k", "5"))
+
+        results = self.ctx.retriever.search(query, limit=top_k)
+
+        context_parts = []
+        for i, r in enumerate(results, 1):
+            context_parts.append(
+                f"【文档 {i}】{r.file_path}\n"
+                f"置信度: {r.confidence_score:.3f} ({r.confidence_reason})\n"
+                f"内容: {r.content}\n"
+            )
+
+        context = "\n".join(context_parts) if context_parts else "未找到相关文档"
+
+        prompt_text = f"""你是一个知识库助手。请基于以下检索结果回答用户问题。
+
+## 用户问题
+{query}
+
+## 知识库检索结果
+{context}
+
+## 回答要求
+1. 仅基于检索结果回答，不要编造信息
+2. 如果检索结果不足，明确说明
+3. 引用文档时标注来源（如：【文档 1】）
+4. 如果有多个相关观点，综合呈现
+
+## 回答"""
+
+        return GetPromptResult(
+            description=f"检索增强回答: {query}",
+            messages=[
+                PromptMessage(role="user", content=TextContent(type="text", text=prompt_text))
+            ],
+        )
+
+    def _prompt_summarize_document(self, args: dict[str, str]) -> GetPromptResult:
+        file_path = args.get("file_path", "")
+
+        # 多级匹配策略：精确匹配 > 绝对路径匹配 > 模糊匹配
+        row = None
+
+        # 1. 精确匹配相对路径 (file_path)
+        row = self.ctx.db.conn.execute(
+            "SELECT id, absolute_path, file_path FROM files WHERE file_path = ? AND is_deleted = 0",
+            (file_path,),
+        ).fetchone()
+
+        # 2. 如果是绝对路径，尝试精确匹配 absolute_path
+        if not row and os.path.isabs(file_path):
+            row = self.ctx.db.conn.execute(
+                "SELECT id, absolute_path, file_path FROM files WHERE absolute_path = ? AND is_deleted = 0",
+                (file_path,),
+            ).fetchone()
+
+        # 3. 最后尝试后缀模糊匹配（文件名匹配）
+        if not row:
+            # 只匹配文件名，避免匹配到多个文件
+            filename = os.path.basename(file_path)
+            rows = self.ctx.db.conn.execute(
+                "SELECT id, absolute_path, file_path FROM files WHERE file_path LIKE ? AND is_deleted = 0",
+                (f"%{filename}",),
+            ).fetchall()
+
+            if len(rows) == 1:
+                row = rows[0]
+            elif len(rows) > 1:
+                # 多个匹配，选择最接近的
+                for r in rows:
+                    if r["file_path"].endswith(file_path):
+                        row = r
+                        break
+                if not row:
+                    row = rows[0]  # 默认取第一个
+
+        if not row:
+            prompt_text = f"未找到文档: {file_path}，请确认路径是否正确。"
+        else:
+            actual_file_path = row["file_path"]  # 使用数据库中的相对路径
+
+            # 从 chunks 表获取内容和 confidence_json
+            chunks = self.ctx.db.conn.execute(
+                "SELECT content, section_title, confidence_json FROM chunks WHERE file_id = ? AND is_deleted = 0 ORDER BY chunk_index",
+                (row["id"],),
+            ).fetchall()
+
+            content = "\n\n".join(
+                f"### {c['section_title'] or '正文'}\n{c['content']}" for c in chunks
+            )
+
+            # 从第一个 chunk 获取 confidence 信息
+            confidence = {}
+            if chunks and chunks[0]["confidence_json"]:
+                try:
+                    confidence = json.loads(chunks[0]["confidence_json"])
+                except json.JSONDecodeError:
+                    pass
+
+            prompt_text = f"""请总结以下文档的核心内容。
+
+## 文档信息
+- 路径: {actual_file_path}
+- 类型: {confidence.get('doc_type', 'unknown')}
+- 状态: {confidence.get('status', 'unknown')}
+- 日期: {confidence.get('final_date', 'unknown')}
+
+## 文档内容
+{content[:8000]}
+
+## 摘要要求
+1. 提炼核心观点（3-5 条）
+2. 说明文档的主要价值
+3. 指出适用场景
+
+## 摘要"""
+
+        return GetPromptResult(
+            description=f"文档摘要: {file_path}",
+            messages=[
+                PromptMessage(role="user", content=TextContent(type="text", text=prompt_text))
+            ],
+        )
+
+
+# =====================
+# Helper Functions
 # =====================
 def _jieba_segment(text: str) -> str:
-    """对中文文本进行 jieba 分词，返回空格拼接的词串"""
     if not text or not text.strip():
         return ""
     import jieba
-
     return " ".join(jieba.cut_for_search(text))
 
 
 def _prepare_fts_content(chunk, file_path: str) -> str:
-    """构建复合检索字符串，所有中文文本字段经 jieba 分词后写入 FTS5"""
     metadata = chunk.metadata or {}
     tags = metadata.get("tags", [])
     if tags is None:
@@ -508,24 +857,18 @@ def _prepare_fts_content(chunk, file_path: str) -> str:
     filename = os.path.basename(file_path)
     section_title = chunk.section_title or ""
 
-    # 对所有含中文的文本字段做 jieba 分词，与检索端保持一致
     parts = [
-        _jieba_segment(filename),
-        _jieba_segment(filename),  # 文件名重复加权
+        _jieba_segment(filename), _jieba_segment(filename),
         _jieba_segment(chunk.section_path or ""),
-        _jieba_segment(section_title),
-        _jieba_segment(section_title),  # 标题重复加权
-        _jieba_segment(tag_str),
-        _jieba_segment(doc_type),
-        _jieba_segment(chunk.content),  # 正文分词
+        _jieba_segment(section_title), _jieba_segment(section_title),
+        _jieba_segment(tag_str), _jieba_segment(doc_type),
+        _jieba_segment(chunk.content),
     ]
     return " ".join(filter(None, parts)).strip()
 
 
 def _json_serialize(obj):
-    """自定义 JSON 序列化器"""
     from datetime import date, datetime
-
     if isinstance(obj, (datetime, date)):
         return obj.isoformat()
     raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
@@ -535,8 +878,6 @@ def _json_serialize(obj):
 # Registry & Server
 # =====================
 class ToolRegistry:
-    """MCP 工具注册中心：注册、列举、分发工具调用。"""
-
     def __init__(self, ctx: AppContext):
         self.tools: dict[str, BaseTool] = {}
         self.ctx = ctx
@@ -552,12 +893,11 @@ class ToolRegistry:
         if name not in self.tools:
             raise ValueError(f"Unknown tool: {name}")
         result = await self.tools[name].run(args)
-        # P2-4: 添加 default=str 兜底 + 移除 indent (机器通信不需要格式化)
         return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False, default=str))]
 
 
 class RagServer:
-    """tinyRAG MCP Server 入口：组装组件、注册工具、启动 stdio 传输。"""
+    """tinyRAG MCP Server v3.1: Tools + Resources + Prompts"""
 
     def __init__(self):
         self.ctx = AppContext()
@@ -566,6 +906,9 @@ class RagServer:
         self.registry.register(ScanTool)
         self.registry.register(RebuildTool)
 
+        self.resource_manager = ResourceManager(self.ctx)
+        self.prompt_manager = PromptManager(self.ctx)
+
         if MCP_AVAILABLE:
             self.server = Server("tinyRAG")
             self._register()
@@ -573,6 +916,7 @@ class RagServer:
             logger.warning("MCP package not installed, running in mock mode")
 
     def _register(self):
+        # ── Tools ──
         @self.server.list_tools()
         async def list_tools():
             return self.registry.list_tools()
@@ -582,11 +926,34 @@ class RagServer:
         async def call_tool(name: str, arguments: dict[str, Any]):
             return await self.registry.execute(name, arguments)
 
+        # ── Resources ──
+        @self.server.list_resources()
+        async def list_resources():
+            return self.resource_manager.list_resources()
+
+        @self.server.list_resource_templates()
+        async def list_resource_templates():
+            return self.resource_manager.list_resource_templates()
+
+        @self.server.read_resource()
+        async def read_resource(uri):
+            # uri 是 AnyUrl 类型，在方法内部转换为字符串
+            return await self.resource_manager.read_resource(uri)
+
+        # ── Prompts ──
+        @self.server.list_prompts()
+        async def list_prompts():
+            return self.prompt_manager.list_prompts()
+
+        @self.server.get_prompt()
+        async def get_prompt(name: str, arguments: dict[str, str]):
+            return await self.prompt_manager.get_prompt(name, arguments)
+
     async def run(self):
         if not MCP_AVAILABLE:
             logger.error("Please install mcp: pip install mcp")
             return
-        logger.info("MCP Stdio Server starting...")
+        logger.info("MCP Stdio Server v3.1 starting (Tools + Resources + Prompts)...")
         try:
             async with stdio_server() as (r, w):
                 await self.server.run(r, w, self.server.create_initialization_options())

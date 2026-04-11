@@ -6,7 +6,10 @@ config.py - tinyRAG 配置契约与加载层
 2. 路径自动展开 (~ -> 绝对路径)
 3. 结构化 Vault 配置 (path, name, enabled)
 4. 安全默认值与缺失字段回退
+5. 支持 per-vault 排除规则
 """
+
+from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, Literal
@@ -15,17 +18,40 @@ import yaml
 from pydantic import BaseModel, Field, field_validator
 
 
+class ExcludeConfig(BaseModel):
+    """扫描排除规则配置"""
+
+    # 排除的目录名（不进入递归）
+    dirs: list[str] = Field(
+        default_factory=lambda: [
+            ".git",
+            ".obsidian",
+            ".trash",
+            ".Trash",
+            "node_modules",
+            "__pycache__",
+            ".venv",
+            "venv",
+            ".idea",
+            ".vscode",
+        ]
+    )
+    # 排除的路径模式（glob 风格）
+    patterns: list[str] = Field(default_factory=list)
+
+
 class VaultConfig(BaseModel):
     """仓库配置单元"""
 
     path: str
     name: str
     enabled: bool = True
+    # per-vault 排除规则（可选，与全局规则合并）
+    exclude: ExcludeConfig | None = None
 
     @field_validator("path")
     @classmethod
     def expand_vault_path(cls, v: str) -> str:
-        # 仅展开 ~/，不强制要求目录已存在（便于首次部署/动态创建）
         return str(Path(v).expanduser())
 
 
@@ -37,7 +63,7 @@ class ModelConfig(BaseModel):
     cache_dir: str = "~/.cache/fastembed"
     unload_after_seconds: int = 30
     dimensions: int = 512
-    batch_size: int = 64  # 模型推理批大小，影响 CPU 利用率
+    batch_size: int = 64
 
     @field_validator("cache_dir")
     @classmethod
@@ -49,9 +75,8 @@ class DateDecayConfig(BaseModel):
     """日期衰减配置"""
 
     enabled: bool = True
-    half_life_days: int = 365  # 默认半衰期 1 年
+    half_life_days: int = 365
     min_weight: float = 0.5
-    # 按文档类型差异化衰减（天）
     type_specific_decay: dict[str, int] = Field(default_factory=dict)
 
 
@@ -71,7 +96,6 @@ class CacheConfig(BaseModel):
 class ConfidenceConfig(BaseModel):
     """置信度与融合权重配置"""
 
-    # chunk 内容类型权重 (用于检索期动态计算)
     type_rules: dict[str, float] = Field(
         default_factory=lambda: {
             "code": 1.1,
@@ -81,9 +105,7 @@ class ConfidenceConfig(BaseModel):
             "list": 0.9,
         }
     )
-    # 文档类型权重 (Frontmatter doc_type 字段)
     doc_type_rules: dict[str, float] = Field(default_factory=dict)
-    # 文档状态权重 (Frontmatter status 字段)
     status_rules: dict[str, float] = Field(
         default_factory=lambda: {
             "published": 1.2,
@@ -93,9 +115,7 @@ class ConfidenceConfig(BaseModel):
             "archived": 0.5,
         }
     )
-    # 日期衰减配置
     date_decay: DateDecayConfig = Field(default_factory=DateDecayConfig)
-    # 未匹配字段时的默认权重
     default_weight: float = 1.0
 
 
@@ -112,14 +132,15 @@ class Settings(BaseModel):
     embedding_model: ModelConfig = Field(default_factory=ModelConfig)
     confidence: ConfidenceConfig = Field(default_factory=ConfidenceConfig)
     chunking: dict[str, int] = {"max_tokens": 512, "overlap": 50}
-    # 流式处理配置（内存优化）
-    stream_batch_size: int = 1000  # 每累积多少 chunks 进行一次向量化入库
-    max_concurrent_files: int = 2  # 并行处理文件数的上限
+    stream_batch_size: int = 1000
+    max_concurrent_files: int = 2
     log_level: str = "INFO"
     retrieval: dict[str, Any] = {"alpha": 0.7, "beta": 0.3}
     maintenance: dict[str, Any] = {"soft_delete_threshold": 0.2, "auto_vacuum": True}
     cache: CacheConfig = Field(default_factory=CacheConfig)
     jieba_user_dict: str = ""
+    # 全局扫描排除规则（作为默认值，与 per-vault 规则合并）
+    exclude: ExcludeConfig = Field(default_factory=ExcludeConfig)
 
     @field_validator("db_path")
     @classmethod
@@ -128,7 +149,9 @@ class Settings(BaseModel):
 
 
 def load_config(config_path: str = "config.yaml") -> Settings:
-    """加载并校验 YAML 配置文件"""
+    """
+    加载并校验 YAML 配置文件
+    """
     path = Path(config_path)
     if not path.exists():
         raise FileNotFoundError(f"❌ 配置文件不存在: {path.absolute()}")
@@ -141,3 +164,40 @@ def load_config(config_path: str = "config.yaml") -> Settings:
         raise ValueError(f"❌ YAML 解析失败: {e}") from e
     except Exception as e:
         raise ValueError(f"❌ 配置校验失败: {e}") from e
+
+
+def get_merged_exclude(vault: VaultConfig, global_exclude: ExcludeConfig) -> ExcludeConfig:
+    """
+    获取 vault 的合并排除规则。
+    规则：全局规则 + vault 特定规则合并（去重）
+
+    :param vault: vault 配置
+    :param global_exclude: 全局排除规则
+    :return: 合并后的排除规则
+    """
+    if vault.exclude is None:
+        return global_exclude
+
+    # 合并 dirs（去重）
+    merged_dirs = list(set(global_exclude.dirs + vault.exclude.dirs))
+
+    # 合并 patterns（去重）
+    merged_patterns = list(set(global_exclude.patterns + vault.exclude.patterns))
+
+    return ExcludeConfig(dirs=merged_dirs, patterns=merged_patterns)
+
+
+# 兼容旧版直接调用
+if __name__ == "__main__":
+    try:
+        cfg = load_config()
+        print("✅ 配置加载成功")
+        print(f"📂 启用仓库: {[v.name for v in cfg.vaults if v.enabled]}")
+        print(f"🗄️ 数据库路径: {cfg.db_path}")
+        print(f"🤖 模型: {cfg.embedding_model.name} (dim={cfg.embedding_model.dimensions})")
+        print(f"🚫 全局排除目录: {cfg.exclude.dirs}")
+        for v in cfg.vaults:
+            if v.exclude:
+                print(f"🚫 {v.name} 排除目录: {v.exclude.dirs}")
+    except Exception as e:
+        print(e)
