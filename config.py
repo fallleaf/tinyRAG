@@ -37,6 +37,7 @@ class ModelConfig(BaseModel):
     cache_dir: str = "~/.cache/fastembed"
     unload_after_seconds: int = 30
     dimensions: int = 512
+    batch_size: int = 64  # 模型推理批大小，影响 CPU 利用率
 
     @field_validator("cache_dir")
     @classmethod
@@ -81,10 +82,8 @@ class ConfidenceConfig(BaseModel):
         }
     )
     # 文档类型权重 (Frontmatter doc_type 字段)
-    # 注意：doc_type_rules 和 status_rules 应在 config.yaml 中定义
     doc_type_rules: dict[str, float] = Field(default_factory=dict)
     # 文档状态权重 (Frontmatter status 字段)
-    # 5 种基础类型：published, completed, active, draft, archived
     status_rules: dict[str, float] = Field(
         default_factory=lambda: {
             "published": 1.2,
@@ -113,14 +112,13 @@ class Settings(BaseModel):
     embedding_model: ModelConfig = Field(default_factory=ModelConfig)
     confidence: ConfidenceConfig = Field(default_factory=ConfidenceConfig)
     chunking: dict[str, int] = {"max_tokens": 512, "overlap": 50}
-    # 修复 L-new2: 删除死配置 memory_limit_mb（未被任何代码使用）
-    # memory_limit_mb: int = 500
+    # 流式处理配置（内存优化）
+    stream_batch_size: int = 1000  # 每累积多少 chunks 进行一次向量化入库
+    max_concurrent_files: int = 2  # 并行处理文件数的上限
     log_level: str = "INFO"
-    # 检索引擎融合权重 (HybridEngine 读取)
     retrieval: dict[str, Any] = {"alpha": 0.7, "beta": 0.3}
     maintenance: dict[str, Any] = {"soft_delete_threshold": 0.2, "auto_vacuum": True}
     cache: CacheConfig = Field(default_factory=CacheConfig)
-    # jieba 用户自定义词典路径（留空则使用默认词典）
     jieba_user_dict: str = ""
 
     @field_validator("db_path")
@@ -130,11 +128,7 @@ class Settings(BaseModel):
 
 
 def load_config(config_path: str = "config.yaml") -> Settings:
-    """
-    加载并校验 YAML 配置文件
-    :param config_path: 配置文件路径
-    :return: 校验通过的 Settings 实例
-    """
+    """加载并校验 YAML 配置文件"""
     path = Path(config_path)
     if not path.exists():
         raise FileNotFoundError(f"❌ 配置文件不存在: {path.absolute()}")
@@ -147,15 +141,3 @@ def load_config(config_path: str = "config.yaml") -> Settings:
         raise ValueError(f"❌ YAML 解析失败: {e}") from e
     except Exception as e:
         raise ValueError(f"❌ 配置校验失败: {e}") from e
-
-
-# 兼容旧版直接调用
-if __name__ == "__main__":
-    try:
-        cfg = load_config()
-        print("✅ 配置加载成功")
-        print(f"📂 启用仓库: {[v.name for v in cfg.vaults if v.enabled]}")
-        print(f"🗄️ 数据库路径: {cfg.db_path}")
-        print(f"🤖 模型: {cfg.embedding_model.name} (dim={cfg.embedding_model.dimensions})")
-    except Exception as e:
-        print(e)

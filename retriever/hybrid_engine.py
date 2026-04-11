@@ -102,6 +102,10 @@ class HybridEngine:
             from pathlib import Path
 
             dict_path = Path(config.jieba_user_dict).expanduser()
+            # 支持相对路径（相对于项目根目录）
+            if not dict_path.is_absolute():
+                # 尝试相对于配置文件所在目录
+                dict_path = Path("data") / dict_path.name
             if dict_path.exists():
                 try:
                     jieba.load_userdict(str(dict_path))
@@ -344,14 +348,18 @@ class HybridEngine:
             conf_score, conf_reason = self._calculate_dynamic_confidence(row["confidence_json"])
 
             # --- 分值融合公式 ---
-            # 向量分 (0-1 之间)
-            v_score = vec_scores.get(cid, 0.0) * alpha
+            # 向量分 (已经是 0-1 范围的余弦相似度)
+            raw_v = vec_scores.get(cid, 0.0)
+            v_score = raw_v * alpha
 
-            # 关键词分 (FTS5 分数可能很大，同样采用对数平滑对齐量级)
+            # 关键词分 (FTS5 BM25 分数可能很大，需要归一化到 0-1 范围)
+            # 使用 sigmoid 归一化: sigmoid(log1p(x)) 将任意正数映射到 (0, 1)
             raw_kw = kw_scores.get(cid, 0.0)
-            k_score = math.log1p(max(0, raw_kw)) * beta
+            # 归一化后的关键词分数 (0-1 范围)
+            normalized_kw = 1.0 / (1.0 + math.exp(-math.log1p(max(0, raw_kw)) + 1.0))
+            k_score = normalized_kw * beta
 
-            # 最终加权
+            # 最终加权 (基础得分范围约为 0 ~ alpha + beta)
             # (基础得分) * 动态置信度系数
             final_score = (v_score + k_score) * conf_score
 
@@ -366,8 +374,8 @@ class HybridEngine:
                     end_pos=row["end_pos"],
                     vault_name=row["vault_name"],
                     chunk_type=row["content_type"],
-                    semantic_score=v_score,
-                    keyword_score=k_score,
+                    semantic_score=raw_v,           # 显示原始向量分数 (0-1)
+                    keyword_score=normalized_kw,    # 显示归一化后的关键词分数 (0-1)
                     confidence_score=conf_score,
                     final_score=final_score,
                     confidence_reason=conf_reason,

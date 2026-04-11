@@ -119,11 +119,11 @@ def cmd_search(args):
         # 修复 M4: 从 config 读取维度
         db = DatabaseManager(str(db_path), vec_dimension=cfg.embedding_model.dimensions)
 
-        # 初始化嵌入引擎
+        # 初始化嵌入引擎（使用 config 中的 batch_size）
         embed_engine = EmbeddingEngine(
             model_name=cfg.embedding_model.name,
             cache_dir=cfg.embedding_model.cache_dir,
-            batch_size=32,
+            batch_size=cfg.embedding_model.batch_size,  # ✅ 统一从 config 读取
             unload_after_seconds=cfg.embedding_model.unload_after_seconds,
         )
 
@@ -162,7 +162,7 @@ def cmd_config(args):
     config_path = script_dir / "config.yaml"
     if args.show:
         if config_path.exists():
-            print("\n📄 配置文件 (config.yaml):\n")
+            print("\n📄 配置文件:\n")
             print(config_path.read_text(encoding="utf-8"))
         else:
             print(f"❌ 配置文件不存在: {config_path}")

@@ -128,7 +128,7 @@ class AppContext:
             embed_engine = EmbeddingEngine(
                 model_name=config.embedding_model.name,
                 cache_dir=config.embedding_model.cache_dir,
-                batch_size=32,
+                batch_size=config.embedding_model.batch_size,
                 unload_after_seconds=config.embedding_model.unload_after_seconds,
             )
 
@@ -337,10 +337,11 @@ class ScanTool(BaseTool):
             logger.info("✨ 没有生成任何 chunks")
             return
 
-        # 3. 分批向量化与入库
+        # 3. 分批向量化与入库（流式处理）
         total_chunks = len(all_pending_chunks)
-        batch_size = 32
-        logger.info(f"🧩 待向量化块总数：{total_chunks}，采用 Batch Size: {batch_size}")
+        batch_size = self.ctx.config.embedding_model.batch_size
+        stream_batch_size = self.ctx.config.stream_batch_size
+        logger.info(f"🧩 待向量化块总数：{total_chunks}，Batch Size: {batch_size}")
 
         processed = 0
         for i in range(0, total_chunks, batch_size):
@@ -453,18 +454,7 @@ class ScanTool(BaseTool):
 
 class RebuildTool(BaseTool):
     name, description = "rebuild_index", "Force rebuild full knowledge index (tinyRAG)"
-    schema: ClassVar[dict] = {
-        "type": "object",
-        "properties": {
-            "batch_size": {
-                "type": "integer",
-                "default": 128,
-                "minimum": 16,
-                "maximum": 512,
-                "description": "Embedding batch size for vectorization",
-            },
-        },
-    }
+    schema: ClassVar[dict] = {"type": "object", "properties": {}}
 
     # P2-3: 补充参数类型注解
     async def run(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -479,16 +469,10 @@ class RebuildTool(BaseTool):
             logger.info("Starting background index rebuild...")
             build_main = _load_build_index_main()
 
-            # P2-2: 支持通过参数自定义 batch_size
-            batch_size = min(max(args.get("batch_size", 128), 16), 512)
-
-            # 修复 M6: 使用 argparse.Namespace 替代自定义类
+            # v2.0: batch_size 从 config 读取，不再通过参数传递
             import argparse
 
-            build_args = argparse.Namespace(
-                force=True,
-                batch_size=batch_size,
-            )
+            build_args = argparse.Namespace(force=True)
 
             # P0-3: asyncio.to_thread 防止同步 build_main 阻塞事件循环
             await asyncio.to_thread(build_main, build_args)
