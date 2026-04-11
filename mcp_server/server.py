@@ -1,17 +1,15 @@
 #!/usr/bin/env python3
 """
-mcp_server/server.py - Production MCP RAG Server (v3.2)
+mcp_server/server.py - Production MCP RAG Server (v1.1.2)
 
-v3.2 修复内容:
-- F1: read_resource 的 uri 参数是 AnyUrl 类型，需要转换为字符串
-- F2: _prompt_summarize_document 路径匹配策略改进
-  - 精确匹配相对路径 (file_path) 优先
-  - 支持绝对路径精确匹配 (absolute_path)
-  - 后缀模糊匹配作为备选，避免匹配到错误文件
+tinyRAG v1.1.2 稳定版本功能:
+1. ✅ Tools 接口: search, scan_index, rebuild_index
+2. ✅ Resources 接口: 知识库统计信息、文档内容
+3. ✅ Prompts 接口: 检索增强提示词模板
 
-v3.0 新增内容:
-1. ✅ Resources 接口：暴露知识库统计信息、文档内容
-2. ✅ Prompts 接口：预定义检索增强提示词模板
+修复记录:
+- F1: read_resource 的 uri 参数 AnyUrl 类型转换
+- F2: summarize_document 路径多级匹配策略
 """
 
 import asyncio
@@ -112,14 +110,17 @@ class AppContext:
 
             db = DatabaseManager(config.db_path, vec_dimension=config.embedding_model.dimensions)
 
-            global_skip_dirs = frozenset(config.exclude.dirs) if hasattr(config, "exclude") else frozenset()
-            global_exclude_patterns = config.exclude.patterns if hasattr(config, "exclude") else []
-            scanner = Scanner(db, skip_dirs=global_skip_dirs, exclude_patterns=global_exclude_patterns)
+            # 合并默认跳过目录和全局排除目录
+            from scanner.scan_engine import DEFAULT_SKIP_DIRS
+            global_skip_dirs = DEFAULT_SKIP_DIRS | frozenset(config.exclude.dirs)
+            scanner = Scanner(db, global_skip_dirs, config.exclude.patterns)
 
             for v in config.vaults:
                 if v.enabled:
-                    merged = get_merged_exclude(v, config.exclude)
-                    vault_excludes[v.name] = (frozenset(merged.dirs), merged.patterns)
+                    if v.exclude:
+                        vault_excludes[v.name] = (frozenset(v.exclude.dirs), v.exclude.patterns)
+                    else:
+                        vault_excludes[v.name] = (frozenset(), [])
 
             embed_engine = EmbeddingEngine(
                 model_name=config.embedding_model.name,
@@ -257,14 +258,28 @@ class ScanTool(BaseTool):
 
     def _process_file_worker(self, file_item: dict, splitter: MarkdownSplitter) -> tuple[int, list, str]:
         abs_path = Path(file_item["absolute_path"])
+        file_id = file_item["id"]
+        file_path = file_item["file_path"]
+        
+        # 防御性检查：文件是否存在
+        if not abs_path.exists():
+            logger.warning(f"⚠️ 文件不存在，跳过：{abs_path}")
+            return file_id, [], file_path
+        
         try:
             content = abs_path.read_text(encoding="utf-8")
             mtime = file_item.get("mtime")
-            chunks = splitter.split(content, file_path=file_item.get("file_path", ""))
-            return file_item["id"], chunks, file_item["file_path"]
+            # 修复：split() 第二个参数是 file_mtime (时间戳)，不是 file_path
+            chunks = splitter.split(content, mtime)
+            
+            # 详细日志：分块结果
+            if not chunks:
+                logger.warning(f"⚠️ 文件分块为空：{file_path} (内容长度: {len(content)} 字符)")
+            
+            return file_id, chunks, file_path
         except Exception as e:
-            logger.error(f"❌ 读取/分块失败：{abs_path} - {e}")
-            return file_item["id"], [], file_item["file_path"]
+            logger.error(f"❌ 读取/分块失败：{abs_path} - {type(e).__name__}: {e}")
+            return file_id, [], file_path
 
     async def _index_changed_files(self, changed_paths: list[str]) -> None:
         if not changed_paths:
@@ -348,6 +363,7 @@ class ScanTool(BaseTool):
     async def run(self, args: dict[str, Any]) -> dict[str, Any]:
         await self.ctx.initialize()
         vault_configs = [(v.name, v.path) for v in self.ctx.config.vaults if v.enabled]
+        # 传入 per-vault 排除规则
         report = await asyncio.to_thread(
             self.ctx.scanner.scan_vaults, vault_configs, self.ctx.vault_excludes
         )
@@ -897,7 +913,7 @@ class ToolRegistry:
 
 
 class RagServer:
-    """tinyRAG MCP Server v3.1: Tools + Resources + Prompts"""
+    """tinyRAG MCP Server v1.1.2: Tools + Resources + Prompts"""
 
     def __init__(self):
         self.ctx = AppContext()
@@ -953,7 +969,7 @@ class RagServer:
         if not MCP_AVAILABLE:
             logger.error("Please install mcp: pip install mcp")
             return
-        logger.info("MCP Stdio Server v3.1 starting (Tools + Resources + Prompts)...")
+        logger.info("MCP Stdio Server v1.1.2 starting (Tools + Resources + Prompts)...")
         try:
             async with stdio_server() as (r, w):
                 await self.server.run(r, w, self.server.create_initialization_options())

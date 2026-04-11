@@ -14,6 +14,7 @@ rag_cli.py - tinyRAG 命令行检索与运维工具
 """
 
 import argparse
+import fnmatch
 import os
 import sys
 import time
@@ -26,6 +27,7 @@ sys.path.insert(0, str(script_dir))
 from config import load_config  # noqa: E402
 from embedder.embed_engine import EmbeddingEngine  # noqa: E402
 from retriever.hybrid_engine import HybridEngine  # noqa: E402
+from scanner.scan_engine import DEFAULT_SKIP_DIRS  # noqa: E402
 from storage.database import DatabaseManager  # noqa: E402
 from utils.logger import setup_logger  # noqa: E402
 
@@ -58,6 +60,11 @@ def cmd_status(args):
 
         print("\n📂 仓库状态:")
         total_files = 0
+        
+        # 全局跳过目录 = 内置默认 + 配置文件全局排除
+        global_skip_dirs = DEFAULT_SKIP_DIRS | frozenset(cfg.exclude.dirs)
+        global_patterns = cfg.exclude.patterns
+        
         for vault in cfg.vaults:
             # ✅ 修复:支持 VaultConfig 对象或字符串路径
             if hasattr(vault, "path"):
@@ -68,7 +75,49 @@ def cmd_status(args):
                 v_name = str(v_path)
 
             if v_path.exists():
-                count = len(list(v_path.rglob("*.md")))
+                # 获取 vault 自身的排除规则（不包含全局配置）
+                vault_skip_dirs = frozenset()
+                vault_patterns = []
+                if vault.exclude:
+                    if vault.exclude.dirs:
+                        vault_skip_dirs = frozenset(vault.exclude.dirs)
+                    if vault.exclude.patterns:
+                        vault_patterns = vault.exclude.patterns
+                
+                # 合并跳过目录：全局 + vault 级（与 scan_engine 逻辑一致）
+                all_skip_dirs = global_skip_dirs | vault_skip_dirs
+                
+                # 合并模式：全局 + vault 级（与 scan_engine 逻辑一致）
+                all_patterns = list(set(global_patterns + vault_patterns))
+                
+                # 统计 Markdown 文件（应用排除规则）
+                count = 0
+                for root, dirs, files in os.walk(v_path):
+                    # 排除指定目录（修改 dirs 列表会影响 os.walk 的遍历）
+                    dirs[:] = [d for d in dirs if d not in all_skip_dirs]
+                    
+                    for fname in files:
+                        if not fname.endswith(".md"):
+                            continue
+                        
+                        # 检查文件模式排除规则（与 scan_engine._match_patterns 逻辑一致）
+                        rel_path = os.path.relpath(os.path.join(root, fname), v_path)
+                        excluded = False
+                        for pattern in all_patterns:
+                            if fnmatch.fnmatch(rel_path, pattern):
+                                excluded = True
+                                break
+                            # 也匹配路径的各部分（与 scan_engine._match_patterns 一致）
+                            for part in rel_path.split(os.sep):
+                                if fnmatch.fnmatch(part, pattern):
+                                    excluded = True
+                                    break
+                            if excluded:
+                                break
+                        
+                        if not excluded:
+                            count += 1
+                
                 total_files += count
                 print(f"   ✅ {v_name} ({count} 个 Markdown 文件)")
             else:
@@ -119,11 +168,11 @@ def cmd_search(args):
         # 修复 M4: 从 config 读取维度
         db = DatabaseManager(str(db_path), vec_dimension=cfg.embedding_model.dimensions)
 
-        # 初始化嵌入引擎（使用 config 中的 batch_size）
+        # 初始化嵌入引擎
         embed_engine = EmbeddingEngine(
             model_name=cfg.embedding_model.name,
             cache_dir=cfg.embedding_model.cache_dir,
-            batch_size=cfg.embedding_model.batch_size,  # ✅ 统一从 config 读取
+            batch_size=32,
             unload_after_seconds=cfg.embedding_model.unload_after_seconds,
         )
 
@@ -162,7 +211,7 @@ def cmd_config(args):
     config_path = script_dir / "config.yaml"
     if args.show:
         if config_path.exists():
-            print("\n📄 配置文件:\n")
+            print("\n📄 配置文件 (config.yaml):\n")
             print(config_path.read_text(encoding="utf-8"))
         else:
             print(f"❌ 配置文件不存在: {config_path}")

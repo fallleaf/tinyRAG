@@ -21,6 +21,8 @@ vaults:
         - "98.附件"
         - "copilot"
         - "Excalidraw"
+        - "00.任务清单"
+        - "99.模板"
     #   patterns:
     #     - "*draft*"
 

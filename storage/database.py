@@ -7,6 +7,7 @@ storage/database.py - SQLite 核心数据库管理器
 3. ✅ upsert_file 移除自提交 commit，将事务控制权交还调用方 (支持 scan_engine 批量事务)
 4. ✅ 向量维度参数化，不再硬编码 512
 5. ✅ 开启外键约束 (ON DELETE CASCADE)
+6. ✅ 处理旧版 schema 的 file_hash UNIQUE 约束冲突
 """
 
 import os
@@ -89,7 +90,6 @@ class DatabaseManager:
             self.conn.execute("PRAGMA foreign_keys = ON")  # 启用外键级联删除
 
             # 1. 加载 Schema
-            # 修复 L5: 优先使用 Schema 文件，否则使用内嵌降级 Schema
             schema_path = os.path.join(os.path.dirname(__file__), "..", "schema_v0.3.3.sql")
             if os.path.exists(schema_path):
                 with open(schema_path, encoding="utf-8") as f:
@@ -114,8 +114,8 @@ class DatabaseManager:
                         embedding float[{self.vec_dimension}]
                     )
                 """)
-                logger.info(f"✅ 向量表 (vectors) 创建成功 (dim={self.vec_dimension})")
-                self.conn.commit()  # 提交向量表创建
+                logger.info(f"✅ 向量表 创建成功 (dim={self.vec_dimension})")
+                self.conn.commit()
             except Exception as e:
                 self.vec_support = False
                 logger.warning(f"⚠️ sqlite-vec 加载失败，系统将降级为 FTS5 模式: {e}")
@@ -138,7 +138,6 @@ class DatabaseManager:
                 "SELECT id, vault_name, file_path, absolute_path, file_hash, is_deleted FROM files WHERE file_hash = ?"
             )
             params: list = [file_hash]
-            # 修复 L4: 增加 vault_name 过滤，避免跨 vault 恢复错绑
             if vault_name:
                 sql += " AND vault_name = ?"
                 params.append(vault_name)
@@ -155,6 +154,8 @@ class DatabaseManager:
         """
         插入或更新文件记录 (UPSERT)
         ⚠️ 重要：此方法不执行 commit，事务控制权交由调用方 (如 scan_engine.process_report)
+        
+        修复：处理旧版 schema 中 file_hash UNIQUE 约束冲突
         """
         try:
             cursor = self.conn.execute(
@@ -179,6 +180,12 @@ class DatabaseManager:
             )
             row = cursor.fetchone()
             return row["id"] if row else -1
+        except sqlite3.IntegrityError as e:
+            # 🔧 修复：处理旧版 schema 的 file_hash UNIQUE 约束冲突
+            if "file_hash" in str(e):
+                logger.warning(f"⚠️ 跳过重复 Hash 文件（旧 schema 约束）：{file_meta['file_path']}")
+                return -1
+            raise
         except Exception as e:
             logger.error(f"❌ 插入/更新文件失败：{e}")
             return -1
@@ -204,28 +211,13 @@ class DatabaseManager:
                 """,
                 (query_blob, limit),
             )
-            # vec0 返回的是 L2 距离，转换为余弦相似度近似: score = 1 / (1 + distance)
             return [(row[0], 1.0 / (1.0 + row[1])) for row in cursor.fetchall()]
         except Exception as e:
             logger.error(f"❌ 向量搜索失败: {e}")
             return []
 
     def escape_fts5_query(self, query: str) -> str:
-        """转义 FTS5 特殊字符，使用 OR 查询提高召回率。
-
-        Args:
-            query: 查询文本（可能包含多个关键字）
-
-        Returns:
-            转义后的 OR 查询字符串
-
-        Example:
-            输入: "极简 网络"
-            输出: "\"极简\" OR \"网络\""
-        """
-        # FTS5 特殊字符: * ^ " ( )
-        # 修复 H3: 使用短语包裹策略，彻底消除运算符注入风险
-        # 改为 OR 查询：提高召回率，返回包含任一关键字的文档
+        """转义 FTS5 特殊字符，使用 OR 查询提高召回率。"""
         terms = query.split()
         escaped_terms = ['"' + term.replace('"', '""') + '"' for term in terms if term.strip()]
         return " OR ".join(escaped_terms)
@@ -238,7 +230,6 @@ class DatabaseManager:
         if not keywords or not keywords.strip():
             return []
         try:
-            # 修复 H3: 转义 FTS5 特殊字符
             escaped_query = self.escape_fts5_query(keywords)
             cursor = self.conn.execute(
                 """
@@ -250,7 +241,6 @@ class DatabaseManager:
                 """,
                 (escaped_query, limit),
             )
-            # FTS5 rank 为负数（绝对值越大越相关），取反使其正向
             return [(row[0], -row[1]) for row in cursor.fetchall()]
         except Exception as e:
             logger.error(f"❌ FTS5 搜索失败: {e}")
