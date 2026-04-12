@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-retriever/hybrid_engine.py - 混合检索引擎 (v4.1 - 置信度计算修复)
+retriever/hybrid_engine.py - 混合检索引擎 (v4.0 - 动态置信度与对数平滑重构)
 
-v4.1 修复内容:
-1. ✅ 修复缺省值不一致：统一使用 technical/completed
-2. ✅ 添加 status 中文→英文映射：已完成→completed, 进行中→active 等
-3. ✅ 优化置信度计算：保留权重差异，避免对数过度压缩
-4. ✅ 置信度归一化：输出范围 [0.5, 1.5]，便于理解
+重构说明:
+1. ✅ 动态计算: 从 chunks.confidence_json 读取原始因子，检索时实时计算得分。
+2. ✅ 对数平滑: 采用 math.log1p 处理权重因子，防止极端权重破坏检索排序。
+3. ✅ 实时衰减: 日期衰减基于检索时刻的 datetime.now() 计算。
+4. ✅ 鲁棒降级: 自动处理缺失字段，注入 blog/已完成/365天 缺省逻辑。
 """
 
 import hashlib
@@ -26,7 +26,9 @@ from utils.logger import logger
 # 检查 jieba 是否可用
 try:
     import jieba
+
     JIEBA_AVAILABLE = True
+    # 修复 L5: 模块级别调用 jieba.initialize()，避免首次使用时的延迟
     jieba.initialize()
 except ImportError:
     JIEBA_AVAILABLE = False
@@ -37,39 +39,16 @@ _cache_spec = importlib.util.find_spec("storage.cache")
 if _cache_spec:
     try:
         from storage.cache import get_cache
+
         CACHE_AVAILABLE = True
     except ImportError:
         CACHE_AVAILABLE = False
+        logger.warning("⚠️ Cache 模块导入失败，将仅使用内存缓存")
 else:
     CACHE_AVAILABLE = False
 
 
-# 🔧 新增：status 中文→英文映射
-STATUS_ZH_TO_EN = {
-    "已完成": "completed",
-    "完成": "completed",
-    "进行中": "active",
-    "进行": "active",
-    "草稿": "draft",
-    "已归档": "archived",
-    "归档": "archived",
-    "已发布": "published",
-    "发布": "published",
-}
-
-# 🔧 新增：doc_type 中文→英文映射
-DOC_TYPE_ZH_TO_EN = {
-    "正式": "official",
-    "项目": "project",
-    "技术": "technical",
-    "个人": "personal",
-    "归档": "archive",
-    "博客": "blog",
-    "日记": "personal",
-    "笔记": "technical",
-}
-
-
+# 修复 L7: 使用 @dataclass 简化 RetrievalResult
 @dataclass
 class RetrievalResult:
     chunk_id: int
@@ -94,12 +73,14 @@ class HybridEngine:
         self.config = config
         self.db = db
         self.embed_engine = embed_engine
-        self.alpha = config.retrieval.get("alpha", 0.7)
-        self.beta = config.retrieval.get("beta", 0.3)
+        self.alpha = config.retrieval.get("alpha", 0.7)  # 向量权重
+        self.beta = config.retrieval.get("beta", 0.3)  # 关键词权重
 
+        # 缓存初始化：优先使用持久化 QueryCache，降级为内存字典
+        # 修复 M2: 使用 OrderedDict 实现 LRU 缓存
         self._memory_cache: OrderedDict = OrderedDict()
         self._memory_cache_max_size = 500
-        self._cache_lock = threading.Lock()
+        self._cache_lock = threading.Lock()  # 添加锁保护
         self._cache = None
         if CACHE_AVAILABLE:
             try:
@@ -111,21 +92,26 @@ class HybridEngine:
                         max_entries=getattr(cache_cfg, "max_entries", 1000),
                     )
                     logger.info("✅ 持久化缓存已启用")
+                else:
+                    logger.info("ℹ️ 未配置 cache，使用内存缓存")
             except Exception as e:
-                logger.warning(f"⚠️ 持久化缓存初始化失败: {e}")
+                logger.warning(f"⚠️ 持久化缓存初始化失败，降级为内存缓存: {e}")
 
+        # 加载 jieba 用户自定义词典
         if JIEBA_AVAILABLE and hasattr(config, "jieba_user_dict") and config.jieba_user_dict:
             from pathlib import Path
+
             dict_path = Path(config.jieba_user_dict).expanduser()
-            if not dict_path.is_absolute():
-                dict_path = Path("data") / dict_path.name
             if dict_path.exists():
                 try:
                     jieba.load_userdict(str(dict_path))
                     logger.info(f"✅ jieba 自定义词典加载成功: {dict_path}")
                 except Exception as e:
                     logger.warning(f"⚠️ jieba 自定义词典加载失败: {e}")
+            else:
+                logger.warning(f"⚠️ jieba 自定义词典文件不存在: {dict_path}")
 
+    # ─── 缓存键生成 ───
     def _make_cache_key(
         self,
         query: str,
@@ -134,15 +120,19 @@ class HybridEngine:
         alpha: float | None = None,
         beta: float | None = None,
     ) -> str:
+        """基于查询内容 + 参数生成确定性缓存键"""
         raw = f"{query}|{limit}"
         if vault_filter:
             raw += f"|{','.join(sorted(vault_filter))}"
+        # 修复 M1: 使用实际生效的 alpha/beta
         if alpha is not None:
             raw += f"|a={alpha:.2f}"
         if beta is not None:
             raw += f"|b={beta:.2f}"
+        # 修复 L4: 使用 hashlib.sha256 替代 hashlib.md5，降低碰撞风险
         return hashlib.sha256(raw.encode()).hexdigest()
 
+    # ─── 序列化 / 反序列化 ───
     @staticmethod
     def _serialize_results(results: list[RetrievalResult]) -> list[dict]:
         return [
@@ -170,35 +160,50 @@ class HybridEngine:
     def _deserialize_results(data: list[dict]) -> list[RetrievalResult]:
         return [RetrievalResult(**item) for item in data]
 
+    # ─── 缓存读写 ───
     def _cache_get(self, cache_key: str) -> list[RetrievalResult] | None:
+        """读取缓存，优先持久化，降级内存"""
+        # 1) 持久化缓存
         if self._cache is not None:
             try:
                 cached = self._cache.get(cache_key)
                 if cached is not None:
+                    logger.debug("Cache HIT (persistent)")
                     return self._deserialize_results(cached)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"持久化缓存读取失败: {e}")
 
+        # 2) 内存缓存（带锁保护）
         with self._cache_lock:
             cached = self._memory_cache.get(cache_key)
             if cached is not None:
+                # LRU: 移动到末尾
                 self._memory_cache.move_to_end(cache_key)
+                logger.debug("Cache HIT (memory)")
                 return self._deserialize_results(cached)
+
         return None
 
     def _cache_set(self, cache_key: str, results: list[RetrievalResult]) -> None:
+        """写入缓存，双层同步"""
         serialized = self._serialize_results(results)
+
+        # 持久化缓存
         if self._cache is not None:
             try:
                 self._cache.set(cache_key, serialized)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"持久化缓存写入失败: {e}")
 
+        # 内存缓存（带锁保护）
         with self._cache_lock:
             self._memory_cache[cache_key] = serialized
+            # LRU: 移动到末尾
             self._memory_cache.move_to_end(cache_key)
+            # LRU: 超过最大容量时删除最旧的
             if len(self._memory_cache) > self._memory_cache_max_size:
                 self._memory_cache.popitem(last=False)
+                logger.debug(f"Memory cache pruned to {len(self._memory_cache)} entries")
 
     def search(
         self,
@@ -208,136 +213,105 @@ class HybridEngine:
         alpha: float | None = None,
         beta: float | None = None,
     ) -> list[RetrievalResult]:
+        """执行混合检索（带缓存）"""
         if not query.strip():
             return []
 
+        # 使用传入的 alpha/beta 或默认值
         effective_alpha = alpha if alpha is not None else self.alpha
         effective_beta = beta if beta is not None else self.beta
 
+        # 0. 缓存查询
+        # 修复 M1: 使用 effective 值生成缓存键
         cache_key = self._make_cache_key(query, limit, vault_filter, effective_alpha, effective_beta)
         cached = self._cache_get(cache_key)
         if cached is not None:
             return cached
 
+        # 1. 生成查询向量
         query_vector = self.embed_engine.embed([query])[0]
-        keywords = " ".join(jieba.cut_for_search(query)) if JIEBA_AVAILABLE else query
-        clean_keywords = re.sub(r"[^\w\s\u4e00-\u9fa5]", " ", keywords).strip()
 
+        # 2. 关键词预处理 (jieba 分词 + 过滤)
+        # 保护日期格式免被 jieba 拆分
+        # 支持格式：
+        # - 数字格式：2023-08-10, 2023-09
+        # - 中文格式：2023年, 2023年9月, 2023年9月23日
+        date_pattern = r"\d{4}(?:-\d{2}(?:-\d{2})?|年(?:\d{1,2}(?:月(?:\d{1,2}日)?)?)?)"
+        date_placeholders = {}
+        protected_query = query
+        for i, match in enumerate(re.finditer(date_pattern, query)):
+            placeholder = f"__DATE_{i}__"
+            date_placeholders[placeholder] = match.group()
+            protected_query = protected_query.replace(match.group(), placeholder, 1)
+        
+        # jieba 分词
+        keywords = " ".join(jieba.cut_for_search(protected_query)) if JIEBA_AVAILABLE else protected_query
+        
+        # 恢复日期格式
+        for placeholder, date_str in date_placeholders.items():
+            keywords = keywords.replace(placeholder, date_str)
+        
+        # 清理特殊字符，但保留日期中的连字符
+        clean_keywords = re.sub(r"[^\w\s\u4e00-\u9fa5\-]", " ", keywords).strip()
+        clean_keywords = re.sub(r"\s+", " ", clean_keywords)
+
+        # 3. 执行检索逻辑
         results = self._search_internal(
             query_vector, clean_keywords, limit, vault_filter, effective_alpha, effective_beta
         )
+
+        # 4. 写入缓存
         self._cache_set(cache_key, results)
+
         return results
-
-    def _normalize_status(self, status: str) -> str:
-        """
-        🔧 新增：标准化 status 值
-        1. 尝试中文→英文映射
-        2. 转小写后匹配
-        3. 返回原始值作为 fallback
-        """
-        # 尝试中文映射
-        if status in STATUS_ZH_TO_EN:
-            return STATUS_ZH_TO_EN[status]
-        
-        # 转小写后直接匹配
-        status_lower = status.lower()
-        
-        # 已知英文状态值
-        known_status = {"published", "completed", "active", "draft", "archived"}
-        if status_lower in known_status:
-            return status_lower
-        
-        return status_lower  # 返回小写版本
-
-    def _normalize_doc_type(self, doc_type: str) -> str:
-        """
-        🔧 新增：标准化 doc_type 值
-        """
-        # 尝试中文映射
-        if doc_type in DOC_TYPE_ZH_TO_EN:
-            return DOC_TYPE_ZH_TO_EN[doc_type]
-        
-        doc_type_lower = doc_type.lower()
-        known_types = {"official", "project", "technical", "personal", "archive", "blog"}
-        if doc_type_lower in known_types:
-            return doc_type_lower
-        
-        return doc_type_lower
 
     def _calculate_dynamic_confidence(self, conf_json_str: str) -> tuple[float, str]:
         """
-        🔧 重构：置信度计算（保留权重差异）
-        
-        v4.1 改进：
-        1. 统一缺省值为 technical/completed
-        2. 自动转换中文 status/doc_type
-        3. 使用归一化公式保留权重差异
+        核心重构：实现设想中的第 5 点（对数计算可信度）
         """
         try:
             data = json.loads(conf_json_str or "{}")
         except json.JSONDecodeError:
             data = {}
 
+        # A. 获取配置
         conf_cfg = self.config.confidence
 
-        # A. 提取并标准化 doc_type
-        raw_doc_type = data.get("doc_type", "technical")  # 🔧 统一缺省值为 technical
-        doc_type = self._normalize_doc_type(raw_doc_type)
-        
-        # B. 提取并标准化 status
-        raw_status = data.get("status", "completed")  # 🔧 统一缺省值为 completed
-        status = self._normalize_status(raw_status)
-
-        # C. 获取权重（使用标准化后的值）
-        dt_w = conf_cfg.doc_type_rules.get(doc_type, conf_cfg.default_weight)
-        st_w = conf_cfg.status_rules.get(status, conf_cfg.default_weight)
-
-        # D. 日期衰减计算
+        # B. 基础因子提取 (含缺省逻辑)
+        doc_type = data.get("doc_type", "technical")
+        status = data.get("status", "active")
         final_date_str = data.get("final_date")
+
+        dt_w = conf_cfg.doc_type_rules.get(doc_type, 1.0)
+        st_w = conf_cfg.status_rules.get(status, 1.0)
+
+        # C. 实时日期衰减计算
         date_w = 1.0
         days_passed = 365
-        
         if final_date_str:
             try:
                 final_dt = datetime.strptime(final_date_str, "%Y-%m-%d")
-                days_passed = max(0, (datetime.now() - final_dt).days)
+                days_passed = (datetime.now() - final_dt).days
 
-                half_life = conf_cfg.date_decay.half_life_days
+                # 根据文档类型选择半衰期
+                half_life = conf_cfg.date_decay.half_life_days  # 默认值
                 if doc_type in conf_cfg.date_decay.type_specific_decay:
                     half_life = conf_cfg.date_decay.type_specific_decay[doc_type]
 
+                # 指数衰减公式: 2^(-days/half_life)
                 decay = math.pow(0.5, days_passed / half_life)
                 date_w = max(conf_cfg.date_decay.min_weight, decay)
             except (ValueError, AttributeError):
                 date_w = conf_cfg.date_decay.min_weight
 
-        # E. 🔧 核心修复：置信度计算公式
-        # 原始公式：log1p(raw_factor) 会过度压缩权重差异
-        # 新公式：归一化到 [0.5, 1.5] 范围，保留权重差异
+        # D. 对数平滑融合 (关键点)
+        # 原始乘积
         raw_factor = dt_w * st_w * date_w
-        
-        # 归一化公式：将 raw_factor (约 0.3~2.0) 映射到 0.5~1.5
-        # 假设 raw_factor 范围为 [0.3, 2.0]
-        MIN_FACTOR = 0.3
-        MAX_FACTOR = 2.0
-        TARGET_MIN = 0.5
-        TARGET_MAX = 1.5
-        
-        # 线性归一化
-        normalized = (raw_factor - MIN_FACTOR) / (MAX_FACTOR - MIN_FACTOR)
-        conf_score = TARGET_MIN + normalized * (TARGET_MAX - TARGET_MIN)
-        
-        # 确保在目标范围内
-        conf_score = max(TARGET_MIN, min(TARGET_MAX, conf_score))
+        # 对数化：使用 ln(1 + x) 保证非负且增长平滑
+        conf_score = math.log1p(raw_factor)
 
-        # F. 生成详细的理由描述（便于调试）
-        reason = (
-            f"Type:{raw_doc_type}→{doc_type}({dt_w:.2f}) | "
-            f"Status:{raw_status}→{status}({st_w:.2f}) | "
-            f"Age:{days_passed}d→{date_w:.2f} | "
-            f"Raw:{raw_factor:.3f}→Score:{conf_score:.3f}"
-        )
+        # E. 生成理由描述
+        reason = f"Type:{doc_type}({dt_w}) | Status:{status}({st_w}) | Age:{days_passed}d"
 
         return conf_score, reason
 
@@ -350,16 +324,22 @@ class HybridEngine:
         alpha: float,
         beta: float,
     ) -> list[RetrievalResult]:
+        """内部检索逻辑：整合向量、FTS5 与 动态权重"""
+
+        # 1. 向量检索 (获取 ID 和向量余弦分)
         vec_results = self.db.search_vectors(query_vector, limit=limit * 2)
         vec_scores = {r[0]: r[1] for r in vec_results}
 
+        # 2. 关键词检索 (获取 ID 和 FTS5 BM25 分)
         kw_results = self.db.search_fts(keywords, limit=limit * 2)
         kw_scores = {r[0]: r[1] for r in kw_results}
 
+        # 合并所有候选 ID
         candidate_ids = list(set(vec_scores.keys()) | set(kw_scores.keys()))
         if not candidate_ids:
             return []
 
+        # 3. 从数据库拉取详细信息 (包括新增的 confidence_json)
         placeholders = ",".join(["?"] * len(candidate_ids))
         query_sql = f"""
             SELECT c.*, f.file_path, f.absolute_path, f.vault_name, f.file_hash
@@ -368,6 +348,7 @@ class HybridEngine:
             WHERE c.id IN ({placeholders}) AND c.is_deleted = 0
         """
 
+        # 修复 C2: 添加 vault_filter 过滤条件
         query_params = list(candidate_ids)
         if vault_filter:
             query_sql += " AND f.vault_name IN ({})".format(",".join(["?"] * len(vault_filter)))
@@ -379,15 +360,19 @@ class HybridEngine:
         for row in rows:
             cid = row["id"]
 
+            # --- 动态计算置信度 ---
             conf_score, conf_reason = self._calculate_dynamic_confidence(row["confidence_json"])
 
-            raw_v = vec_scores.get(cid, 0.0)
-            v_score = raw_v * alpha
+            # --- 分值融合公式 ---
+            # 向量分 (0-1 之间)
+            v_score = vec_scores.get(cid, 0.0) * alpha
 
+            # 关键词分 (FTS5 分数可能很大，同样采用对数平滑对齐量级)
             raw_kw = kw_scores.get(cid, 0.0)
-            normalized_kw = 1.0 / (1.0 + math.exp(-math.log1p(max(0, raw_kw)) + 1.0))
-            k_score = normalized_kw * beta
+            k_score = math.log1p(max(0, raw_kw)) * beta
 
+            # 最终加权
+            # (基础得分) * 动态置信度系数
             final_score = (v_score + k_score) * conf_score
 
             final_results.append(
@@ -401,8 +386,8 @@ class HybridEngine:
                     end_pos=row["end_pos"],
                     vault_name=row["vault_name"],
                     chunk_type=row["content_type"],
-                    semantic_score=raw_v,
-                    keyword_score=normalized_kw,
+                    semantic_score=v_score,
+                    keyword_score=k_score,
                     confidence_score=conf_score,
                     final_score=final_score,
                     confidence_reason=conf_reason,
@@ -410,5 +395,6 @@ class HybridEngine:
                 )
             )
 
+        # 4. 排序并截断
         final_results.sort(key=lambda x: x.final_score, reverse=True)
         return final_results[:limit]

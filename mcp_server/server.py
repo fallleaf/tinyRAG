@@ -17,6 +17,7 @@ import contextlib
 import importlib.util
 import json
 import os
+import re
 import sys
 from collections.abc import Awaitable, Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -233,7 +234,14 @@ class SearchTool(BaseTool):
         else:
             alpha, beta = None, None
 
-        results = await asyncio.to_thread(self.ctx.retriever.search, query, limit=top_k, alpha=alpha, beta=beta)
+        # 构建 vault_filter（与 rag_cli.py 保持一致）
+        vaults = [v.name for v in self.ctx.config.vaults if v.enabled]
+        vault_filter = vaults if vaults else None
+
+        results = await asyncio.to_thread(
+            self.ctx.retriever.search, query, limit=top_k, 
+            vault_filter=vault_filter, alpha=alpha, beta=beta
+        )
         return {
             "query": query,
             "total": len(results),
@@ -400,7 +408,9 @@ class RebuildTool(BaseTool):
             logger.info("Starting background index rebuild...")
             build_main = _load_build_index_main()
             import argparse
-            build_args = argparse.Namespace(force=True)
+            # 从配置读取 batch_size，而不是硬编码
+            batch_size = self.ctx.config.embedding_model.batch_size
+            build_args = argparse.Namespace(force=True, batch_size=batch_size)
             await asyncio.to_thread(build_main, build_args)
             logger.info("Index rebuild completed successfully")
         except Exception as e:
@@ -853,11 +863,33 @@ class PromptManager:
 # =====================
 # Helper Functions
 # =====================
+# 日期保护正则（与 build_index.py、hybrid_engine.py 保持一致）
+_DATE_PATTERN = re.compile(
+    r"\d{4}(?:-\d{2}(?:-\d{2})?|年(?:\d{1,2}(?:月(?:\d{1,2}日)?)?)?)"
+)
+
 def _jieba_segment(text: str) -> str:
+    """对中文文本进行 jieba 分词，保护日期格式免被拆分"""
     if not text or not text.strip():
         return ""
     import jieba
-    return " ".join(jieba.cut_for_search(text))
+    
+    # 保护日期格式
+    date_placeholders = {}
+    protected_text = text
+    for i, match in enumerate(_DATE_PATTERN.finditer(text)):
+        placeholder = f"__DATE_{i}__"
+        date_placeholders[placeholder] = match.group()
+        protected_text = protected_text.replace(match.group(), placeholder, 1)
+    
+    # jieba 分词
+    segmented = " ".join(jieba.cut_for_search(protected_text))
+    
+    # 恢复日期格式
+    for placeholder, date_str in date_placeholders.items():
+        segmented = segmented.replace(placeholder, date_str)
+    
+    return segmented
 
 
 def _prepare_fts_content(chunk, file_path: str) -> str:

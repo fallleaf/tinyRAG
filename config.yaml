@@ -36,7 +36,7 @@ embedding_model:
   size: "small"
   dimensions: 512
   unload_after_seconds: 300
-  batch_size: 64  # 模型推理批大小，影响 CPU 利用率，建议 32-128
+  batch_size: 32  # 模型推理批大小，影响 CPU 利用率，建议 32-128
 
 # 分块配置
 chunking:

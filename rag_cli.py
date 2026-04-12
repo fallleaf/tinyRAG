@@ -172,7 +172,7 @@ def cmd_search(args):
         embed_engine = EmbeddingEngine(
             model_name=cfg.embedding_model.name,
             cache_dir=cfg.embedding_model.cache_dir,
-            batch_size=32,
+            batch_size=cfg.embedding_model.batch_size,
             unload_after_seconds=cfg.embedding_model.unload_after_seconds,
         )
 
@@ -248,7 +248,7 @@ def main():
 
     sp_search = subparsers.add_parser("search", help="执行混合检索")
     sp_search.add_argument("query", help="查询文本")
-    sp_search.add_argument("--top-k", type=int, default=5, help="返回结果数量")
+    sp_search.add_argument("--top-k", type=int, default=10, help="返回结果数量")
     sp_search.add_argument(
         "--mode",
         choices=["hybrid", "keyword", "semantic"],
