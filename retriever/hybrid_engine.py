@@ -23,6 +23,16 @@ from typing import Any
 from storage.database import DatabaseManager
 from utils.logger import logger
 
+# 时间范围查询检测正则
+_TIME_RANGE_PATTERNS = [
+    # 完整日期: 2023-08-10, 2023年8月10日
+    r"(\d{4})(?:-(\d{2})(?:-(\d{2}))?|年(\d{1,2})(?:月(\d{1,2})日)?)",
+    # 年月: 2023-08, 2023年8月
+    r"(\d{4})(?:-(\d{2})|年(\d{1,2})月)(?![\-日\d])",
+    # 年份: 2023年
+    r"(\d{4})年(?!\d)",
+]
+
 # 检查 jieba 是否可用
 try:
     import jieba
@@ -110,6 +120,87 @@ class HybridEngine:
                     logger.warning(f"⚠️ jieba 自定义词典加载失败: {e}")
             else:
                 logger.warning(f"⚠️ jieba 自定义词典文件不存在: {dict_path}")
+
+    # ─── 时间范围查询检测 ───
+    def _extract_time_range_from_query(self, query: str) -> dict | None:
+        """
+        从查询中提取时间范围意图
+        
+        返回: {"year": int, "month": int|None, "day": int|None} 或 None
+        """
+        # 匹配 YYYY-MM-DD 或 YYYY年M月D日 格式
+        match = re.search(r"(\d{4})(?:-(\d{1,2})(?:-(\d{1,2}))?|年(\d{1,2})(?:月(\d{1,2})日)?)", query)
+        if match:
+            year = int(match.group(1))
+            # 数字格式: 2023-08-10
+            month = int(match.group(2)) if match.group(2) else None
+            day = int(match.group(3)) if match.group(3) else None
+            # 中文格式: 2023年8月10日
+            if match.group(4):
+                month = int(match.group(4))
+            if match.group(5):
+                day = int(match.group(5))
+            return {"year": year, "month": month, "day": day}
+        
+        # 匹配 YYYY年 格式
+        match = re.search(r"(\d{4})年(?!\d)", query)
+        if match:
+            return {"year": int(match.group(1)), "month": None, "day": None}
+        
+        return None
+
+    def _calculate_time_match_score(self, doc_date_str: str, query_time: dict) -> float:
+        """
+        计算文档日期与查询时间范围的匹配度
+        
+        Args:
+            doc_date_str: 文档的 final_date (YYYY-MM-DD 格式)
+            query_time: {"year": int, "month": int|None, "day": int|None}
+        
+        Returns:
+            匹配分数 (0.0 - 2.0)，越高越匹配
+        """
+        try:
+            doc_date = datetime.strptime(doc_date_str, "%Y-%m-%d")
+        except (ValueError, TypeError):
+            return 1.0  # 解析失败，返回中性值
+        
+        query_year = query_time.get("year")
+        query_month = query_time.get("month")
+        query_day = query_time.get("day")
+        
+        # 完全匹配: 年月日都匹配
+        if query_day and query_month:
+            if (doc_date.year == query_year and 
+                doc_date.month == query_month and 
+                doc_date.day == query_day):
+                return 2.0  # 最高匹配
+            # 同一月
+            if doc_date.year == query_year and doc_date.month == query_month:
+                return 1.5
+            # 同一年
+            if doc_date.year == query_year:
+                return 1.0
+            # 不同年
+            return 0.3
+        
+        # 年月匹配
+        if query_month:
+            if doc_date.year == query_year and doc_date.month == query_month:
+                return 2.0
+            if doc_date.year == query_year:
+                return 1.0
+            return 0.3
+        
+        # 年份匹配
+        if doc_date.year == query_year:
+            return 2.0
+        
+        # 距离目标年份越远，分数越低
+        year_diff = abs(doc_date.year - query_year)
+        if year_diff == 1:
+            return 0.5
+        return 0.2
 
     # ─── 缓存键生成 ───
     def _make_cache_key(
@@ -213,7 +304,12 @@ class HybridEngine:
         alpha: float | None = None,
         beta: float | None = None,
     ) -> list[RetrievalResult]:
-        """执行混合检索（带缓存）"""
+        """执行混合检索（带缓存）
+        
+        自动检测时间范围查询，并调整日期权重计算策略：
+        - 时间范围查询（如 "2023年8月的日记"）：使用时间匹配度
+        - 普通查询：使用日期衰减
+        """
         if not query.strip():
             return []
 
@@ -221,17 +317,28 @@ class HybridEngine:
         effective_alpha = alpha if alpha is not None else self.alpha
         effective_beta = beta if beta is not None else self.beta
 
-        # 0. 缓存查询
-        # 修复 M1: 使用 effective 值生成缓存键
-        cache_key = self._make_cache_key(query, limit, vault_filter, effective_alpha, effective_beta)
+        # 0. 检测时间范围查询
+        query_time = self._extract_time_range_from_query(query)
+        if query_time:
+            logger.debug(f"🕐 检测到时间范围查询: {query_time}")
+
+        # 1. 缓存查询（注意：需要包含 query_time 在缓存键中）
+        cache_key = self._make_cache_key(
+            query, limit, vault_filter, effective_alpha, effective_beta
+        )
+        # 如果是时间范围查询，添加时间标记到缓存键
+        if query_time:
+            time_key = f"{query_time.get('year')}-{query_time.get('month') or 0}-{query_time.get('day') or 0}"
+            cache_key = hashlib.sha256((cache_key + time_key).encode()).hexdigest()
+        
         cached = self._cache_get(cache_key)
         if cached is not None:
             return cached
 
-        # 1. 生成查询向量
+        # 2. 生成查询向量
         query_vector = self.embed_engine.embed([query])[0]
 
-        # 2. 关键词预处理 (jieba 分词 + 过滤)
+        # 3. 关键词预处理 (jieba 分词 + 过滤)
         # 保护日期格式免被 jieba 拆分
         # 支持格式：
         # - 数字格式：2023-08-10, 2023-09
@@ -255,19 +362,29 @@ class HybridEngine:
         clean_keywords = re.sub(r"[^\w\s\u4e00-\u9fa5\-]", " ", keywords).strip()
         clean_keywords = re.sub(r"\s+", " ", clean_keywords)
 
-        # 3. 执行检索逻辑
+        # 4. 执行检索逻辑（传入时间范围参数）
         results = self._search_internal(
-            query_vector, clean_keywords, limit, vault_filter, effective_alpha, effective_beta
+            query_vector, clean_keywords, limit, vault_filter, 
+            effective_alpha, effective_beta, query_time
         )
 
-        # 4. 写入缓存
+        # 5. 写入缓存
         self._cache_set(cache_key, results)
 
         return results
 
-    def _calculate_dynamic_confidence(self, conf_json_str: str) -> tuple[float, str]:
+    def _calculate_dynamic_confidence(
+        self, 
+        conf_json_str: str, 
+        query_time: dict | None = None
+    ) -> tuple[float, str]:
         """
         核心重构：实现设想中的第 5 点（对数计算可信度）
+        
+        Args:
+            conf_json_str: 从数据库读取的 confidence_json
+            query_time: 如果是时间范围查询，包含 {"year", "month", "day"}
+                        此时使用时间匹配度替代日期衰减
         """
         try:
             data = json.loads(conf_json_str or "{}")
@@ -285,24 +402,38 @@ class HybridEngine:
         dt_w = conf_cfg.doc_type_rules.get(doc_type, 1.0)
         st_w = conf_cfg.status_rules.get(status, 1.0)
 
-        # C. 实时日期衰减计算
+        # C. 日期权重计算
         date_w = 1.0
         days_passed = 365
+        time_match_mode = False
+        
         if final_date_str:
-            try:
-                final_dt = datetime.strptime(final_date_str, "%Y-%m-%d")
-                days_passed = (datetime.now() - final_dt).days
+            # 如果是时间范围查询，使用时间匹配度替代日期衰减
+            if query_time:
+                time_match_mode = True
+                date_w = self._calculate_time_match_score(final_date_str, query_time)
+                # 解析文档日期用于显示
+                try:
+                    final_dt = datetime.strptime(final_date_str, "%Y-%m-%d")
+                    days_passed = (datetime.now() - final_dt).days
+                except ValueError:
+                    days_passed = 0
+            else:
+                # 普通查询：使用日期衰减
+                try:
+                    final_dt = datetime.strptime(final_date_str, "%Y-%m-%d")
+                    days_passed = (datetime.now() - final_dt).days
 
-                # 根据文档类型选择半衰期
-                half_life = conf_cfg.date_decay.half_life_days  # 默认值
-                if doc_type in conf_cfg.date_decay.type_specific_decay:
-                    half_life = conf_cfg.date_decay.type_specific_decay[doc_type]
+                    # 根据文档类型选择半衰期
+                    half_life = conf_cfg.date_decay.half_life_days  # 默认值
+                    if doc_type in conf_cfg.date_decay.type_specific_decay:
+                        half_life = conf_cfg.date_decay.type_specific_decay[doc_type]
 
-                # 指数衰减公式: 2^(-days/half_life)
-                decay = math.pow(0.5, days_passed / half_life)
-                date_w = max(conf_cfg.date_decay.min_weight, decay)
-            except (ValueError, AttributeError):
-                date_w = conf_cfg.date_decay.min_weight
+                    # 指数衰减公式: 2^(-days/half_life)
+                    decay = math.pow(0.5, days_passed / half_life)
+                    date_w = max(conf_cfg.date_decay.min_weight, decay)
+                except (ValueError, AttributeError):
+                    date_w = conf_cfg.date_decay.min_weight
 
         # D. 对数平滑融合 (关键点)
         # 原始乘积
@@ -311,7 +442,10 @@ class HybridEngine:
         conf_score = math.log1p(raw_factor)
 
         # E. 生成理由描述
-        reason = f"Type:{doc_type}({dt_w}) | Status:{status}({st_w}) | Age:{days_passed}d"
+        if time_match_mode:
+            reason = f"Type:{doc_type}({dt_w}) | Status:{status}({st_w}) | TimeMatch:{date_w:.1f}"
+        else:
+            reason = f"Type:{doc_type}({dt_w}) | Status:{status}({st_w}) | Age:{days_passed}d"
 
         return conf_score, reason
 
@@ -323,8 +457,19 @@ class HybridEngine:
         vault_filter: list[str] | None,
         alpha: float,
         beta: float,
+        query_time: dict | None = None,
     ) -> list[RetrievalResult]:
-        """内部检索逻辑：整合向量、FTS5 与 动态权重"""
+        """内部检索逻辑：整合向量、FTS5 与 动态权重
+        
+        Args:
+            query_vector: 查询向量
+            keywords: 关键词字符串
+            limit: 返回数量限制
+            vault_filter: 仓库过滤列表
+            alpha: 向量权重
+            beta: 关键词权重
+            query_time: 时间范围查询参数 {"year", "month", "day"}
+        """
 
         # 1. 向量检索 (获取 ID 和向量余弦分)
         vec_results = self.db.search_vectors(query_vector, limit=limit * 2)
@@ -361,7 +506,9 @@ class HybridEngine:
             cid = row["id"]
 
             # --- 动态计算置信度 ---
-            conf_score, conf_reason = self._calculate_dynamic_confidence(row["confidence_json"])
+            conf_score, conf_reason = self._calculate_dynamic_confidence(
+                row["confidence_json"], query_time
+            )
 
             # --- 分值融合公式 ---
             # 向量分 (0-1 之间)

@@ -61,9 +61,11 @@ confidence:
   # Frontmatter doc_type 权重 (文档分类 - 5 种基础类型)
   doc_type_rules:
     official: 1.2
-    project: 1.00
+    project: 1.0
     technical: 1.1
     personal: 0.9
+    blog: 0.9
+    dairy: 1.0
     archive: 0.7
   # Frontmatter status 权重 (文档状态 - 5 种基础类型)
   status_rules:
