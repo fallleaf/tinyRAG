@@ -354,6 +354,10 @@ class HybridEngine:
         # jieba 分词
         keywords = " ".join(jieba.cut_for_search(protected_query)) if JIEBA_AVAILABLE else protected_query
         
+        # 修复被 jieba 拆分的占位符（如 "__ DATE _ 0 __" -> "__DATE_0__"）
+        broken_pattern = re.compile(r'__\s*DATE\s*_\s*(\d+)\s*__')
+        keywords = broken_pattern.sub(r'__DATE_\1__', keywords)
+        
         # 恢复日期格式
         for placeholder, date_str in date_placeholders.items():
             keywords = keywords.replace(placeholder, date_str)

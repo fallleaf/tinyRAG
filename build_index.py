@@ -71,9 +71,17 @@ def _jieba_segment(text: str) -> str:
     # jieba 分词
     segmented = " ".join(jieba.cut_for_search(protected_text))
     
+    # 修复被 jieba 拆分的占位符（如 "__ DATE _ 0 __" -> "__DATE_0__"）
+    import re as re_module
+    broken_pattern = re_module.compile(r'__\s*DATE\s*_\s*(\d+)\s*__')
+    segmented = broken_pattern.sub(r'__DATE_\1__', segmented)
+    
     # 恢复日期格式
     for placeholder, date_str in date_placeholders.items():
         segmented = segmented.replace(placeholder, date_str)
+    
+    # 清理点号前后的空格（如 "2026-04-13. md" -> "2026-04-13.md"）
+    segmented = re_module.sub(r'\s*\.\s*', '.', segmented)
     
     return segmented
 
