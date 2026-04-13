@@ -42,6 +42,14 @@ embedding_model:
 chunking:
   max_tokens: 512
   overlap: 50
+  # Token 计算模式: "estimate" (估算) 或 "tiktoken" (精确)
+  token_mode: "tiktoken"
+  # 估算模式参数
+  chinese_chars_per_token: 1.5   # 中文约 1.5 字符/token
+  english_chars_per_token: 4.0   # 英文/符号约 4 字符/token
+  max_chars_multiplier: 2.5      # max_chars 保守系数
+
+
 
 # 流式处理配置（内存优化）
 stream_batch_size: 128  # 每累积多少 chunks 进行一次向量化入库
