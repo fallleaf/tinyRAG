@@ -134,7 +134,7 @@ class Scanner:
     def _match_patterns(self, rel_path: str, patterns: list[str]) -> bool:
         """
         检查相对路径是否匹配任一 glob 模式
-        
+
         :param rel_path: 文件相对路径
         :param patterns: glob 模式列表
         :return: 是否匹配
@@ -158,7 +158,7 @@ class Scanner:
         阶段 1 — 轻量路径收集：
         遍历所有 vault，收集磁盘上 .md 文件的路径和 stat 信息。
         跳过隐藏目录，不计算 hash，纯 I/O 遍历。
-        
+
         :param vault_configs: [(vault_name, vault_path), ...]
         :param vault_excludes: {vault_name: (skip_dirs, exclude_patterns), ...}
         :return: {absolute_path: (vault_name, rel_path, mtime, file_size)}
@@ -173,9 +173,7 @@ class Scanner:
                 continue
 
             # 获取该 vault 的排除规则
-            vault_skip_dirs, vault_patterns = vault_excludes.get(
-                vault_name, (frozenset(), [])
-            )
+            vault_skip_dirs, vault_patterns = vault_excludes.get(vault_name, (frozenset(), []))
             # 日志：只显示 vault 自身的排除规则（不包含全局）
             if vault_skip_dirs or vault_patterns:
                 exclude_info = []
@@ -186,7 +184,7 @@ class Scanner:
                 logger.info(f"📂 扫描 {vault_name}: vault 级排除 {', '.join(exclude_info)}")
             else:
                 logger.info(f"📂 扫描 {vault_name}")
-            
+
             # 合并全局跳过目录和 vault 级跳过目录
             all_skip_dirs = self._skip_dirs | vault_skip_dirs
             # 合并全局和 vault 级 patterns
@@ -195,14 +193,14 @@ class Scanner:
             for root, dirs, files in os.walk(vault_path):
                 # 就地过滤：阻止 os.walk 递归进入排除目录
                 dirs[:] = sorted(d for d in dirs if d not in all_skip_dirs)
-                
+
                 for fname in sorted(files):
                     if not fname.endswith(".md"):
                         continue
 
                     abs_path = os.path.join(root, fname)
                     rel_path = os.path.relpath(abs_path, vault_path)
-                    
+
                     # 检查文件模式排除规则（合并后的）
                     if all_patterns and self._match_patterns(rel_path, all_patterns):
                         logger.debug(f"⏭️ 排除文件（模式匹配）：{rel_path}")
@@ -236,7 +234,7 @@ class Scanner:
         - 对每个新增文件，检查其 hash 是否匹配消失文件
         - 匹配成功 → 移动事件；匹配失败 → 新增文件
         - 此策略不依赖遍历顺序，结果确定且正确
-        
+
         :param vault_configs: [(vault_name, vault_path), ...]
         :param vault_excludes: {vault_name: (skip_dirs, exclude_patterns), ...}
         :return: ScanReport 实例
@@ -352,9 +350,7 @@ class Scanner:
             # ── 新增文件 ──────────────────────────────────
             for meta in report.new_files:
                 # 修复 L4: 传入 vault_name 参数，避免跨 vault 恢复错绑
-                existing = self.db.find_file_by_hash(
-                    meta.file_hash, include_deleted=True, vault_name=meta.vault_name
-                )
+                existing = self.db.find_file_by_hash(meta.file_hash, include_deleted=True, vault_name=meta.vault_name)
                 if existing and existing["is_deleted"] == 1:
                     # 恢复已软删除的记录（避免重复 INSERT + 保留历史关联）
                     self.db.conn.execute(

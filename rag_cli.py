@@ -60,11 +60,11 @@ def cmd_status(args):
 
         print("\n📂 仓库状态:")
         total_files = 0
-        
+
         # 全局跳过目录 = 内置默认 + 配置文件全局排除
         global_skip_dirs = DEFAULT_SKIP_DIRS | frozenset(cfg.exclude.dirs)
         global_patterns = cfg.exclude.patterns
-        
+
         for vault in cfg.vaults:
             # ✅ 修复:支持 VaultConfig 对象或字符串路径
             if hasattr(vault, "path"):
@@ -83,23 +83,23 @@ def cmd_status(args):
                         vault_skip_dirs = frozenset(vault.exclude.dirs)
                     if vault.exclude.patterns:
                         vault_patterns = vault.exclude.patterns
-                
+
                 # 合并跳过目录：全局 + vault 级（与 scan_engine 逻辑一致）
                 all_skip_dirs = global_skip_dirs | vault_skip_dirs
-                
+
                 # 合并模式：全局 + vault 级（与 scan_engine 逻辑一致）
                 all_patterns = list(set(global_patterns + vault_patterns))
-                
+
                 # 统计 Markdown 文件（应用排除规则）
                 count = 0
                 for root, dirs, files in os.walk(v_path):
                     # 排除指定目录（修改 dirs 列表会影响 os.walk 的遍历）
                     dirs[:] = [d for d in dirs if d not in all_skip_dirs]
-                    
+
                     for fname in files:
                         if not fname.endswith(".md"):
                             continue
-                        
+
                         # 检查文件模式排除规则（与 scan_engine._match_patterns 逻辑一致）
                         rel_path = os.path.relpath(os.path.join(root, fname), v_path)
                         excluded = False
@@ -114,10 +114,10 @@ def cmd_status(args):
                                     break
                             if excluded:
                                 break
-                        
+
                         if not excluded:
                             count += 1
-                
+
                 total_files += count
                 print(f"   ✅ {v_name} ({count} 个 Markdown 文件)")
             else:

@@ -159,7 +159,7 @@ class DatabaseManager:
         """
         插入或更新文件记录 (UPSERT)
         ⚠️ 重要：此方法不执行 commit，事务控制权交由调用方 (如 scan_engine.process_report)
-        
+
         修复：处理旧版 schema 中 file_hash UNIQUE 约束冲突
         """
         try:

@@ -37,7 +37,7 @@ _RE_TABLE_ROW = re.compile(r"^\|")
 _RE_LIST_ITEM = re.compile(r"^(\s*)([*+-]|\d+\.)\s+")
 _RE_YAML_BLOCK = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 # 句子边界正则（用于行内切分）
-_RE_SENTENCE_BOUNDARY = re.compile(r'([。！？.!?]\s*|[；;]\s*|[\n])')
+_RE_SENTENCE_BOUNDARY = re.compile(r"([。！？.!?]\s*|[；;]\s*|[\n])")
 
 
 class ChunkType(Enum):
@@ -64,7 +64,7 @@ class Chunk:
 class MarkdownSplitter:
     def __init__(self, config: Any):
         self.config = config
-        
+
         # 读取分块配置 (支持 ChunkingConfig 对象或 dict)
         chunking = config.chunking
         if hasattr(chunking, "max_tokens"):
@@ -83,18 +83,19 @@ class MarkdownSplitter:
             self.chinese_chars_per_token = chunking.get("chinese_chars_per_token", 1.5)
             self.english_chars_per_token = chunking.get("english_chars_per_token", 4.0)
             self.max_chars_multiplier = chunking.get("max_chars_multiplier", 2.5)
-        
+
         # 尝试加载 tiktoken
         self._tiktoken_enc = None
         if self.token_mode == "tiktoken":
             try:
                 import tiktoken
+
                 self._tiktoken_enc = tiktoken.get_encoding("cl100k_base")
                 logger.info("✅ tiktoken 已加载，使用精确 token 计算")
             except ImportError:
                 logger.warning("⚠️ tiktoken 未安装，回退到估算模式")
                 self.token_mode = "estimate"
-        
+
         # 使用配置化的乘数计算保守上限
         self.max_chars = int(self.max_tokens * self.max_chars_multiplier)
         self.overlap_chars = int(self.overlap * 2.0)  # 重叠字符数
@@ -102,21 +103,21 @@ class MarkdownSplitter:
     def _count_tokens(self, text: str) -> int:
         """
         计算 token 数量
-        
+
         模式:
         - tiktoken: 使用 tiktoken 库精确计算
         - estimate: 区分中英文估算 (参数可配置)
         """
         if self._tiktoken_enc:
             return len(self._tiktoken_enc.encode(text))
-        
+
         # 估算模式：区分中英文 (使用配置化的参数)
-        chinese_chars = len(re.findall(r'[\u4e00-\u9fff]', text))
+        chinese_chars = len(re.findall(r"[\u4e00-\u9fff]", text))
         other_chars = len(text) - chinese_chars
-        
+
         # 使用配置化的字符/token 比例
         return int(chinese_chars / self.chinese_chars_per_token + other_chars / self.english_chars_per_token)
-    
+
     def _estimate_chars_for_tokens(self, tokens: int, sample_text: str = None) -> int:
         """
         估算指定 token 数对应的字符数上限
@@ -125,45 +126,47 @@ class MarkdownSplitter:
         # 保守估计：使用英文的 chars/token 比（最小比值，确保不会低估）
         return int(tokens * self.english_chars_per_token)
 
-    def _split_long_content(self, text: str, c_type: ChunkType, s_stack: list[str],
-                            s_pos: int, frontmatter: dict, conf_meta: dict) -> list[Chunk]:
+    def _split_long_content(
+        self, text: str, c_type: ChunkType, s_stack: list[str], s_pos: int, frontmatter: dict, conf_meta: dict
+    ) -> list[Chunk]:
         """
         对超长内容进行二次切分
-        
+
         处理策略：
         1. TEXT/HEADER: 按句子边界切分
-        2. CODE/TABLE/LIST: 
+        2. CODE/TABLE/LIST:
            - 轻度超长（< 2x max_tokens）：保持完整
            - 极端超长（>= 2x max_tokens）：强制切分
         """
         s_title = s_stack[-1] if s_stack else None
         s_path = " / ".join(s_stack) if s_stack else "Root"
-        
+
         token_count = self._count_tokens(text)
-        
+
         # CODE/TABLE/LIST 类型：轻度超长时保持完整
         if c_type in (ChunkType.CODE, ChunkType.TABLE, ChunkType.LIST):
             if token_count < self.max_tokens * 2:
                 # 轻度超长（< 2x），保持完整
-                return [Chunk(
-                    content=text,
-                    content_type=c_type,
-                    section_title=s_title,
-                    section_path=s_path,
-                    start_pos=s_pos,
-                    end_pos=s_pos + len(text),
-                    metadata=frontmatter,
-                    confidence_metadata=conf_meta,
-                )]
+                return [
+                    Chunk(
+                        content=text,
+                        content_type=c_type,
+                        section_title=s_title,
+                        section_path=s_path,
+                        start_pos=s_pos,
+                        end_pos=s_pos + len(text),
+                        metadata=frontmatter,
+                        confidence_metadata=conf_meta,
+                    )
+                ]
             # 极端超长，需要切分
             logger.warning(
-                f"⚠️ {c_type.value} 类型 chunk 严重超限 "
-                f"({token_count} > {self.max_tokens * 2})，强制切分"
+                f"⚠️ {c_type.value} 类型 chunk 严重超限 " f"({token_count} > {self.max_tokens * 2})，强制切分"
             )
-        
+
         # TEXT/HEADER 类型 或 极端超长的 CODE/TABLE/LIST：按句子边界切分
         chunks = []
-        
+
         # 按句子边界分割
         parts = _RE_SENTENCE_BOUNDARY.split(text)
         sentences = []
@@ -174,23 +177,64 @@ class MarkdownSplitter:
                 sentences.append(parts[i])
         if len(parts) % 2 == 1 and parts[-1].strip():
             sentences.append(parts[-1])
-        
+
         if not sentences:
             sentences = [text]
-        
+
         # 合并句子到接近 max_tokens
         current_text = ""
         current_start = s_pos
-        
+
         for sentence in sentences:
             test_text = current_text + sentence
             test_tokens = self._count_tokens(test_text)
-            
+
             # 如果单句就超过 max_tokens，需要强制切分
             if self._count_tokens(sentence) > self.max_tokens:
                 # 先输出当前累积的内容
                 if current_text.strip():
-                    chunks.append(Chunk(
+                    chunks.append(
+                        Chunk(
+                            content=current_text.strip(),
+                            content_type=c_type,
+                            section_title=s_title,
+                            section_path=s_path,
+                            start_pos=current_start,
+                            end_pos=current_start + len(current_text),
+                            metadata=frontmatter,
+                            confidence_metadata=conf_meta,
+                        )
+                    )
+                    current_start += len(current_text)
+
+                # 按固定长度切分超长句子
+                target_chars = int(self.max_tokens * self.chinese_chars_per_token * 0.9)
+
+                for i in range(0, len(sentence), target_chars):
+                    part = sentence[i : i + target_chars]
+                    if part.strip():
+                        chunks.append(
+                            Chunk(
+                                content=part.strip(),
+                                content_type=c_type,
+                                section_title=s_title,
+                                section_path=s_path,
+                                start_pos=current_start + i,
+                                end_pos=current_start + i + len(part),
+                                metadata=frontmatter,
+                                confidence_metadata=conf_meta,
+                            )
+                        )
+
+                current_text = ""
+                current_start = (
+                    s_pos + len(text[: text.find(sentence) + len(sentence)]) if sentence in text else current_start
+                )
+
+            elif test_tokens > self.max_tokens and current_text.strip():
+                # 当前句子加入后会超限，先输出累积的内容
+                chunks.append(
+                    Chunk(
                         content=current_text.strip(),
                         content_type=c_type,
                         section_title=s_title,
@@ -199,32 +243,17 @@ class MarkdownSplitter:
                         end_pos=current_start + len(current_text),
                         metadata=frontmatter,
                         confidence_metadata=conf_meta,
-                    ))
-                    current_start += len(current_text)
-                
-                # 按固定长度切分超长句子
-                target_chars = int(self.max_tokens * self.chinese_chars_per_token * 0.9)
-                
-                for i in range(0, len(sentence), target_chars):
-                    part = sentence[i:i + target_chars]
-                    if part.strip():
-                        chunks.append(Chunk(
-                            content=part.strip(),
-                            content_type=c_type,
-                            section_title=s_title,
-                            section_path=s_path,
-                            start_pos=current_start + i,
-                            end_pos=current_start + i + len(part),
-                            metadata=frontmatter,
-                            confidence_metadata=conf_meta,
-                        ))
-                
-                current_text = ""
-                current_start = s_pos + len(text[:text.find(sentence) + len(sentence)]) if sentence in text else current_start
-            
-            elif test_tokens > self.max_tokens and current_text.strip():
-                # 当前句子加入后会超限，先输出累积的内容
-                chunks.append(Chunk(
+                    )
+                )
+                current_text = sentence
+                current_start = s_pos + len(text[: text.find(sentence)]) if sentence in text else current_start
+            else:
+                current_text = test_text
+
+        # 输出剩余内容
+        if current_text.strip():
+            chunks.append(
+                Chunk(
                     content=current_text.strip(),
                     content_type=c_type,
                     section_title=s_title,
@@ -233,35 +262,25 @@ class MarkdownSplitter:
                     end_pos=current_start + len(current_text),
                     metadata=frontmatter,
                     confidence_metadata=conf_meta,
-                ))
-                current_text = sentence
-                current_start = s_pos + len(text[:text.find(sentence)]) if sentence in text else current_start
-            else:
-                current_text = test_text
-        
-        # 输出剩余内容
-        if current_text.strip():
-            chunks.append(Chunk(
-                content=current_text.strip(),
-                content_type=c_type,
-                section_title=s_title,
-                section_path=s_path,
-                start_pos=current_start,
-                end_pos=current_start + len(current_text),
-                metadata=frontmatter,
-                confidence_metadata=conf_meta,
-            ))
-        
-        return chunks if chunks else [Chunk(
-            content=text,
-            content_type=c_type,
-            section_title=s_title,
-            section_path=s_path,
-            start_pos=s_pos,
-            end_pos=s_pos + len(text),
-            metadata=frontmatter,
-            confidence_metadata=conf_meta,
-        )]
+                )
+            )
+
+        return (
+            chunks
+            if chunks
+            else [
+                Chunk(
+                    content=text,
+                    content_type=c_type,
+                    section_title=s_title,
+                    section_path=s_path,
+                    start_pos=s_pos,
+                    end_pos=s_pos + len(text),
+                    metadata=frontmatter,
+                    confidence_metadata=conf_meta,
+                )
+            ]
+        )
 
     def split(self, text: str, file_mtime: float | None) -> list[Chunk]:
         """
@@ -289,9 +308,7 @@ class MarkdownSplitter:
             token_count = self._count_tokens(chunk_text)
             if token_count > self.max_tokens:
                 # 超限则进行二次切分
-                return self._split_long_content(
-                    chunk_text, c_type, s_stack, s_pos, frontmatter, conf_meta
-                )
+                return self._split_long_content(chunk_text, c_type, s_stack, s_pos, frontmatter, conf_meta)
 
             s_title = s_stack[-1] if s_stack else None
             s_path = " / ".join(s_stack) if s_stack else "Root"
@@ -510,7 +527,7 @@ class MarkdownSplitter:
                 buffer_text = "".join(current_buffer)
                 if self._count_tokens(buffer_text) > self.max_tokens:
                     should_split = True
-            
+
             if should_split:
                 chunks.extend(
                     create_chunks(
@@ -530,7 +547,7 @@ class MarkdownSplitter:
                     overlap_tokens = self.overlap
                     overlap_lines = []
                     overlap_text = ""
-                    
+
                     # 从后向前添加行，直到达到 overlap token 数
                     for line in reversed(current_buffer):
                         test_text = line + overlap_text
@@ -538,7 +555,7 @@ class MarkdownSplitter:
                             break
                         overlap_lines.insert(0, line)
                         overlap_text = test_text
-                    
+
                     current_buffer = overlap_lines
                     buf_size = len(overlap_text)
                     start_pos = current_pos - buf_size

@@ -113,6 +113,7 @@ class AppContext:
 
             # 合并默认跳过目录和全局排除目录
             from scanner.scan_engine import DEFAULT_SKIP_DIRS
+
             global_skip_dirs = DEFAULT_SKIP_DIRS | frozenset(config.exclude.dirs)
             scanner = Scanner(db, global_skip_dirs, config.exclude.patterns)
 
@@ -239,8 +240,7 @@ class SearchTool(BaseTool):
         vault_filter = vaults if vaults else None
 
         results = await asyncio.to_thread(
-            self.ctx.retriever.search, query, limit=top_k, 
-            vault_filter=vault_filter, alpha=alpha, beta=beta
+            self.ctx.retriever.search, query, limit=top_k, vault_filter=vault_filter, alpha=alpha, beta=beta
         )
         return {
             "query": query,
@@ -268,22 +268,22 @@ class ScanTool(BaseTool):
         abs_path = Path(file_item["absolute_path"])
         file_id = file_item["id"]
         file_path = file_item["file_path"]
-        
+
         # 防御性检查：文件是否存在
         if not abs_path.exists():
             logger.warning(f"⚠️ 文件不存在，跳过：{abs_path}")
             return file_id, [], file_path
-        
+
         try:
             content = abs_path.read_text(encoding="utf-8")
             mtime = file_item.get("mtime")
             # 修复：split() 第二个参数是 file_mtime (时间戳)，不是 file_path
             chunks = splitter.split(content, mtime)
-            
+
             # 详细日志：分块结果
             if not chunks:
                 logger.warning(f"⚠️ 文件分块为空：{file_path} (内容长度: {len(content)} 字符)")
-            
+
             return file_id, chunks, file_path
         except Exception as e:
             logger.error(f"❌ 读取/分块失败：{abs_path} - {type(e).__name__}: {e}")
@@ -333,20 +333,33 @@ class ScanTool(BaseTool):
                 for idx, ((file_id, chunk, f_path), emb) in enumerate(zip(batch, embeddings)):
                     global_idx = processed + idx
                     metadata_json = json.dumps(chunk.metadata or {}, ensure_ascii=False, default=_json_serialize)
-                    confidence_json = json.dumps(chunk.confidence_metadata or {}, ensure_ascii=False, default=_json_serialize)
+                    confidence_json = json.dumps(
+                        chunk.confidence_metadata or {}, ensure_ascii=False, default=_json_serialize
+                    )
 
                     cursor = self.ctx.db.conn.execute(
                         """INSERT INTO chunks (file_id, chunk_index, content, content_type, section_title, section_path,
                         start_pos, end_pos, confidence_final_weight, metadata, confidence_json)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                        (file_id, global_idx, chunk.content, chunk.content_type.value,
-                         chunk.section_title, chunk.section_path, chunk.start_pos, chunk.end_pos,
-                         1.0, metadata_json, confidence_json),
+                        (
+                            file_id,
+                            global_idx,
+                            chunk.content,
+                            chunk.content_type.value,
+                            chunk.section_title,
+                            chunk.section_path,
+                            chunk.start_pos,
+                            chunk.end_pos,
+                            1.0,
+                            metadata_json,
+                            confidence_json,
+                        ),
                     )
                     new_chunk_id = cursor.lastrowid
 
                     if self.ctx.db.vec_support:
                         import array
+
                         self.ctx.db.conn.execute(
                             "INSERT INTO vectors (chunk_id, embedding) VALUES (?, ?)",
                             (new_chunk_id, array.array("f", emb).tobytes()),
@@ -372,9 +385,7 @@ class ScanTool(BaseTool):
         await self.ctx.initialize()
         vault_configs = [(v.name, v.path) for v in self.ctx.config.vaults if v.enabled]
         # 传入 per-vault 排除规则
-        report = await asyncio.to_thread(
-            self.ctx.scanner.scan_vaults, vault_configs, self.ctx.vault_excludes
-        )
+        report = await asyncio.to_thread(self.ctx.scanner.scan_vaults, vault_configs, self.ctx.vault_excludes)
         await asyncio.to_thread(self.ctx.scanner.process_report, report)
 
         changed_paths = [f.absolute_path for f in report.new_files + report.modified_files]
@@ -408,6 +419,7 @@ class RebuildTool(BaseTool):
             logger.info("Starting background index rebuild...")
             build_main = _load_build_index_main()
             import argparse
+
             # 从配置读取 batch_size，而不是硬编码
             batch_size = self.ctx.config.embedding_model.batch_size
             build_args = argparse.Namespace(force=True, batch_size=batch_size)
@@ -603,8 +615,7 @@ class ResourceManager:
             "files_count": files_count,
             "chunks_count": chunks_count,
             "recent_files": [
-                {"path": row["file_path"], "mtime": row["mtime"], "size": row["file_size"]}
-                for row in recent_files
+                {"path": row["file_path"], "mtime": row["mtime"], "size": row["file_size"]} for row in recent_files
             ],
             "doc_type_distribution": {row["doc_type"] or "unknown": row["cnt"] for row in doc_types},
         }
@@ -767,9 +778,7 @@ class PromptManager:
 
         return GetPromptResult(
             description=f"检索增强回答: {query}",
-            messages=[
-                PromptMessage(role="user", content=TextContent(type="text", text=prompt_text))
-            ],
+            messages=[PromptMessage(role="user", content=TextContent(type="text", text=prompt_text))],
         )
 
     def _prompt_summarize_document(self, args: dict[str, str]) -> GetPromptResult:
@@ -822,9 +831,7 @@ class PromptManager:
                 (row["id"],),
             ).fetchall()
 
-            content = "\n\n".join(
-                f"### {c['section_title'] or '正文'}\n{c['content']}" for c in chunks
-            )
+            content = "\n\n".join(f"### {c['section_title'] or '正文'}\n{c['content']}" for c in chunks)
 
             # 从第一个 chunk 获取 confidence 信息
             confidence = {}
@@ -854,9 +861,7 @@ class PromptManager:
 
         return GetPromptResult(
             description=f"文档摘要: {file_path}",
-            messages=[
-                PromptMessage(role="user", content=TextContent(type="text", text=prompt_text))
-            ],
+            messages=[PromptMessage(role="user", content=TextContent(type="text", text=prompt_text))],
         )
 
 
@@ -864,16 +869,15 @@ class PromptManager:
 # Helper Functions
 # =====================
 # 日期保护正则（与 build_index.py、hybrid_engine.py 保持一致）
-_DATE_PATTERN = re.compile(
-    r"\d{4}(?:-\d{2}(?:-\d{2})?|年(?:\d{1,2}(?:月(?:\d{1,2}日)?)?)?)"
-)
+_DATE_PATTERN = re.compile(r"\d{4}(?:-\d{2}(?:-\d{2})?|年(?:\d{1,2}(?:月(?:\d{1,2}日)?)?)?)")
+
 
 def _jieba_segment(text: str) -> str:
     """对中文文本进行 jieba 分词，保护日期格式免被拆分"""
     if not text or not text.strip():
         return ""
     import jieba
-    
+
     # 保护日期格式
     date_placeholders = {}
     protected_text = text
@@ -881,21 +885,21 @@ def _jieba_segment(text: str) -> str:
         placeholder = f"__DATE_{i}__"
         date_placeholders[placeholder] = match.group()
         protected_text = protected_text.replace(match.group(), placeholder, 1)
-    
+
     # jieba 分词
     segmented = " ".join(jieba.cut_for_search(protected_text))
-    
+
     # 修复被 jieba 拆分的占位符（如 "__ DATE _ 0 __" -> "__DATE_0__"）
-    broken_pattern = re.compile(r'__\s*DATE\s*_\s*(\d+)\s*__')
-    segmented = broken_pattern.sub(r'__DATE_\1__', segmented)
-    
+    broken_pattern = re.compile(r"__\s*DATE\s*_\s*(\d+)\s*__")
+    segmented = broken_pattern.sub(r"__DATE_\1__", segmented)
+
     # 恢复日期格式
     for placeholder, date_str in date_placeholders.items():
         segmented = segmented.replace(placeholder, date_str)
-    
+
     # 清理点号前后的空格（如 "2026-04-13. md" -> "2026-04-13.md"）
-    segmented = re.sub(r'\s*\.\s*', '.', segmented)
-    
+    segmented = re.sub(r"\s*\.\s*", ".", segmented)
+
     return segmented
 
 
@@ -913,10 +917,13 @@ def _prepare_fts_content(chunk, file_path: str) -> str:
     section_title = chunk.section_title or ""
 
     parts = [
-        _jieba_segment(filename), _jieba_segment(filename),
+        _jieba_segment(filename),
+        _jieba_segment(filename),
         _jieba_segment(chunk.section_path or ""),
-        _jieba_segment(section_title), _jieba_segment(section_title),
-        _jieba_segment(tag_str), _jieba_segment(doc_type),
+        _jieba_segment(section_title),
+        _jieba_segment(section_title),
+        _jieba_segment(tag_str),
+        _jieba_segment(doc_type),
         _jieba_segment(chunk.content),
     ]
     return " ".join(filter(None, parts)).strip()
@@ -924,6 +931,7 @@ def _prepare_fts_content(chunk, file_path: str) -> str:
 
 def _json_serialize(obj):
     from datetime import date, datetime
+
     if isinstance(obj, (datetime, date)):
         return obj.isoformat()
     raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")

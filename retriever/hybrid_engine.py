@@ -125,7 +125,7 @@ class HybridEngine:
     def _extract_time_range_from_query(self, query: str) -> dict | None:
         """
         从查询中提取时间范围意图
-        
+
         返回: {"year": int, "month": int|None, "day": int|None} 或 None
         """
         # 匹配 YYYY-MM-DD 或 YYYY年M月D日 格式
@@ -141,22 +141,22 @@ class HybridEngine:
             if match.group(5):
                 day = int(match.group(5))
             return {"year": year, "month": month, "day": day}
-        
+
         # 匹配 YYYY年 格式
         match = re.search(r"(\d{4})年(?!\d)", query)
         if match:
             return {"year": int(match.group(1)), "month": None, "day": None}
-        
+
         return None
 
     def _calculate_time_match_score(self, doc_date_str: str, query_time: dict) -> float:
         """
         计算文档日期与查询时间范围的匹配度
-        
+
         Args:
             doc_date_str: 文档的 final_date (YYYY-MM-DD 格式)
             query_time: {"year": int, "month": int|None, "day": int|None}
-        
+
         Returns:
             匹配分数 (0.0 - 2.0)，越高越匹配
         """
@@ -164,16 +164,14 @@ class HybridEngine:
             doc_date = datetime.strptime(doc_date_str, "%Y-%m-%d")
         except (ValueError, TypeError):
             return 1.0  # 解析失败，返回中性值
-        
+
         query_year = query_time.get("year")
         query_month = query_time.get("month")
         query_day = query_time.get("day")
-        
+
         # 完全匹配: 年月日都匹配
         if query_day and query_month:
-            if (doc_date.year == query_year and 
-                doc_date.month == query_month and 
-                doc_date.day == query_day):
+            if doc_date.year == query_year and doc_date.month == query_month and doc_date.day == query_day:
                 return 2.0  # 最高匹配
             # 同一月
             if doc_date.year == query_year and doc_date.month == query_month:
@@ -183,7 +181,7 @@ class HybridEngine:
                 return 1.0
             # 不同年
             return 0.3
-        
+
         # 年月匹配
         if query_month:
             if doc_date.year == query_year and doc_date.month == query_month:
@@ -191,11 +189,11 @@ class HybridEngine:
             if doc_date.year == query_year:
                 return 1.0
             return 0.3
-        
+
         # 年份匹配
         if doc_date.year == query_year:
             return 2.0
-        
+
         # 距离目标年份越远，分数越低
         year_diff = abs(doc_date.year - query_year)
         if year_diff == 1:
@@ -305,7 +303,7 @@ class HybridEngine:
         beta: float | None = None,
     ) -> list[RetrievalResult]:
         """执行混合检索（带缓存）
-        
+
         自动检测时间范围查询，并调整日期权重计算策略：
         - 时间范围查询（如 "2023年8月的日记"）：使用时间匹配度
         - 普通查询：使用日期衰减
@@ -323,14 +321,12 @@ class HybridEngine:
             logger.debug(f"🕐 检测到时间范围查询: {query_time}")
 
         # 1. 缓存查询（注意：需要包含 query_time 在缓存键中）
-        cache_key = self._make_cache_key(
-            query, limit, vault_filter, effective_alpha, effective_beta
-        )
+        cache_key = self._make_cache_key(query, limit, vault_filter, effective_alpha, effective_beta)
         # 如果是时间范围查询，添加时间标记到缓存键
         if query_time:
             time_key = f"{query_time.get('year')}-{query_time.get('month') or 0}-{query_time.get('day') or 0}"
             cache_key = hashlib.sha256((cache_key + time_key).encode()).hexdigest()
-        
+
         cached = self._cache_get(cache_key)
         if cached is not None:
             return cached
@@ -350,26 +346,25 @@ class HybridEngine:
             placeholder = f"__DATE_{i}__"
             date_placeholders[placeholder] = match.group()
             protected_query = protected_query.replace(match.group(), placeholder, 1)
-        
+
         # jieba 分词
         keywords = " ".join(jieba.cut_for_search(protected_query)) if JIEBA_AVAILABLE else protected_query
-        
+
         # 修复被 jieba 拆分的占位符（如 "__ DATE _ 0 __" -> "__DATE_0__"）
-        broken_pattern = re.compile(r'__\s*DATE\s*_\s*(\d+)\s*__')
-        keywords = broken_pattern.sub(r'__DATE_\1__', keywords)
-        
+        broken_pattern = re.compile(r"__\s*DATE\s*_\s*(\d+)\s*__")
+        keywords = broken_pattern.sub(r"__DATE_\1__", keywords)
+
         # 恢复日期格式
         for placeholder, date_str in date_placeholders.items():
             keywords = keywords.replace(placeholder, date_str)
-        
+
         # 清理特殊字符，但保留日期中的连字符
         clean_keywords = re.sub(r"[^\w\s\u4e00-\u9fa5\-]", " ", keywords).strip()
         clean_keywords = re.sub(r"\s+", " ", clean_keywords)
 
         # 4. 执行检索逻辑（传入时间范围参数）
         results = self._search_internal(
-            query_vector, clean_keywords, limit, vault_filter, 
-            effective_alpha, effective_beta, query_time
+            query_vector, clean_keywords, limit, vault_filter, effective_alpha, effective_beta, query_time
         )
 
         # 5. 写入缓存
@@ -377,14 +372,10 @@ class HybridEngine:
 
         return results
 
-    def _calculate_dynamic_confidence(
-        self, 
-        conf_json_str: str, 
-        query_time: dict | None = None
-    ) -> tuple[float, str]:
+    def _calculate_dynamic_confidence(self, conf_json_str: str, query_time: dict | None = None) -> tuple[float, str]:
         """
         核心重构：实现设想中的第 5 点（对数计算可信度）
-        
+
         Args:
             conf_json_str: 从数据库读取的 confidence_json
             query_time: 如果是时间范围查询，包含 {"year", "month", "day"}
@@ -410,7 +401,7 @@ class HybridEngine:
         date_w = 1.0
         days_passed = 365
         time_match_mode = False
-        
+
         if final_date_str:
             # 如果是时间范围查询，使用时间匹配度替代日期衰减
             if query_time:
@@ -464,7 +455,7 @@ class HybridEngine:
         query_time: dict | None = None,
     ) -> list[RetrievalResult]:
         """内部检索逻辑：整合向量、FTS5 与 动态权重
-        
+
         Args:
             query_vector: 查询向量
             keywords: 关键词字符串
@@ -510,9 +501,7 @@ class HybridEngine:
             cid = row["id"]
 
             # --- 动态计算置信度 ---
-            conf_score, conf_reason = self._calculate_dynamic_confidence(
-                row["confidence_json"], query_time
-            )
+            conf_score, conf_reason = self._calculate_dynamic_confidence(row["confidence_json"], query_time)
 
             # --- 分值融合公式 ---
             # 向量分 (0-1 之间)

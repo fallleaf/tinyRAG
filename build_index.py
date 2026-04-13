@@ -2,6 +2,7 @@
 """
 build_index.py - tinyRAG 高性能索引构建器 (v2.0 流式处理版 + 日期保护)
 """
+
 import argparse
 import array
 import json
@@ -31,9 +32,7 @@ _jieba_dict_loaded = False
 
 # 日期保护正则（与 hybrid_engine.py 保持一致）
 # 支持格式：YYYY-MM-DD, YYYY-MM, YYYY年, YYYY年M月, YYYY年M月D日
-_DATE_PATTERN = re.compile(
-    r"\d{4}(?:-\d{2}(?:-\d{2})?|年(?:\d{1,2}(?:月(?:\d{1,2}日)?)?)?)"
-)
+_DATE_PATTERN = re.compile(r"\d{4}(?:-\d{2}(?:-\d{2})?|年(?:\d{1,2}(?:月(?:\d{1,2}日)?)?)?)")
 
 
 def _ensure_jieba_user_dict(config):
@@ -59,7 +58,7 @@ def _jieba_segment(text: str) -> str:
     """对中文文本进行 jieba 分词，保护日期格式免被拆分"""
     if not text or not text.strip():
         return ""
-    
+
     # 保护日期格式
     date_placeholders = {}
     protected_text = text
@@ -67,22 +66,23 @@ def _jieba_segment(text: str) -> str:
         placeholder = f"__DATE_{i}__"
         date_placeholders[placeholder] = match.group()
         protected_text = protected_text.replace(match.group(), placeholder, 1)
-    
+
     # jieba 分词
     segmented = " ".join(jieba.cut_for_search(protected_text))
-    
+
     # 修复被 jieba 拆分的占位符（如 "__ DATE _ 0 __" -> "__DATE_0__"）
     import re as re_module
-    broken_pattern = re_module.compile(r'__\s*DATE\s*_\s*(\d+)\s*__')
-    segmented = broken_pattern.sub(r'__DATE_\1__', segmented)
-    
+
+    broken_pattern = re_module.compile(r"__\s*DATE\s*_\s*(\d+)\s*__")
+    segmented = broken_pattern.sub(r"__DATE_\1__", segmented)
+
     # 恢复日期格式
     for placeholder, date_str in date_placeholders.items():
         segmented = segmented.replace(placeholder, date_str)
-    
+
     # 清理点号前后的空格（如 "2026-04-13. md" -> "2026-04-13.md"）
-    segmented = re_module.sub(r'\s*\.\s*', '.', segmented)
-    
+    segmented = re_module.sub(r"\s*\.\s*", ".", segmented)
+
     return segmented
 
 
@@ -101,10 +101,13 @@ def prepare_fts_content(chunk, file_path: str) -> str:
     section_title = chunk.section_title or ""
 
     parts = [
-        _jieba_segment(filename), _jieba_segment(filename),
+        _jieba_segment(filename),
+        _jieba_segment(filename),
         _jieba_segment(chunk.section_path or ""),
-        _jieba_segment(section_title), _jieba_segment(section_title),
-        _jieba_segment(tag_str), _jieba_segment(doc_type),
+        _jieba_segment(section_title),
+        _jieba_segment(section_title),
+        _jieba_segment(tag_str),
+        _jieba_segment(doc_type),
         _jieba_segment(chunk.content),
     ]
     return " ".join(filter(None, parts)).strip()
@@ -112,6 +115,7 @@ def prepare_fts_content(chunk, file_path: str) -> str:
 
 def json_serialize(obj):
     from datetime import date, datetime
+
     if isinstance(obj, (datetime, date)):
         return obj.isoformat()
     raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
@@ -153,22 +157,29 @@ def process_and_commit_batch(
                start_pos, end_pos, confidence_final_weight, metadata, confidence_json)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
-                file_id, chunk_idx, chunk.content, chunk.content_type.value,
-                chunk.section_title, chunk.section_path, chunk.start_pos, chunk.end_pos,
-                1.0, metadata_json, confidence_json
-            )
+                file_id,
+                chunk_idx,
+                chunk.content,
+                chunk.content_type.value,
+                chunk.section_title,
+                chunk.section_path,
+                chunk.start_pos,
+                chunk.end_pos,
+                1.0,
+                metadata_json,
+                confidence_json,
+            ),
         )
         new_chunk_id = cursor.lastrowid
 
         if db.vec_support:
             db.conn.execute(
                 "INSERT INTO vectors (chunk_id, embedding) VALUES (?, ?)",
-                (new_chunk_id, array.array("f", emb).tobytes())
+                (new_chunk_id, array.array("f", emb).tobytes()),
             )
 
         db.conn.execute(
-            "INSERT INTO fts5_index (rowid, content) VALUES (?, ?)",
-            (new_chunk_id, prepare_fts_content(chunk, f_path))
+            "INSERT INTO fts5_index (rowid, content) VALUES (?, ?)", (new_chunk_id, prepare_fts_content(chunk, f_path))
         )
 
     db.conn.commit()
@@ -194,7 +205,7 @@ def main():
     # 构建全局排除规则（默认 + 全局配置）
     global_skip_dirs = DEFAULT_SKIP_DIRS | frozenset(config.exclude.dirs)
     scanner = Scanner(db, skip_dirs=global_skip_dirs, global_patterns=config.exclude.patterns)
-    
+
     if config.exclude.dirs:
         logger.info(f"🚫 全局排除目录: {config.exclude.dirs}")
     if config.exclude.patterns:
@@ -281,8 +292,10 @@ def main():
     max_concurrent_files = getattr(config, "max_concurrent_files", os.cpu_count() or 4)
 
     logger.info(f"🚀 开始处理 {len(files_to_index)} 个文件（流式模式）...")
-    logger.info(f"⚙️ 配置: batch_size={config.embedding_model.batch_size}, "
-                f"stream_batch_size={stream_batch_size}, max_concurrent_files={max_concurrent_files}")
+    logger.info(
+        f"⚙️ 配置: batch_size={config.embedding_model.batch_size}, "
+        f"stream_batch_size={stream_batch_size}, max_concurrent_files={max_concurrent_files}"
+    )
 
     pending_chunks: list[tuple[int, Any, str]] = []
     total_processed = 0
@@ -291,6 +304,7 @@ def main():
 
     try:
         from tqdm import tqdm
+
         pbar = tqdm(total=len(files_to_index), desc="文件处理", unit="文件", file=sys.stdout, leave=True)
     except ImportError:
         pbar = None
@@ -299,10 +313,7 @@ def main():
 
     try:
         with ThreadPoolExecutor(max_workers=max_concurrent_files) as executor:
-            for f_id, chunks, f_path in executor.map(
-                lambda f: process_file_worker(f, splitter),
-                files_to_index
-            ):
+            for f_id, chunks, f_path in executor.map(lambda f: process_file_worker(f, splitter), files_to_index):
                 for c in chunks:
                     pending_chunks.append((f_id, c, f_path))
 
@@ -310,9 +321,7 @@ def main():
                     total_files_with_chunks += 1
 
                 if len(pending_chunks) >= stream_batch_size:
-                    global_chunk_idx = process_and_commit_batch(
-                        pending_chunks, embedder, db, global_chunk_idx
-                    )
+                    global_chunk_idx = process_and_commit_batch(pending_chunks, embedder, db, global_chunk_idx)
                     total_processed += len(pending_chunks)
                     logger.debug(f"✅ 已处理 {total_processed} 个 chunks")
                     pending_chunks.clear()
@@ -321,9 +330,7 @@ def main():
                     pbar.update(1)
 
         if pending_chunks:
-            global_chunk_idx = process_and_commit_batch(
-                pending_chunks, embedder, db, global_chunk_idx
-            )
+            global_chunk_idx = process_and_commit_batch(pending_chunks, embedder, db, global_chunk_idx)
             total_processed += len(pending_chunks)
             pending_chunks.clear()
 

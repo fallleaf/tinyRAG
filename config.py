@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field, field_validator
 
 class ExcludeConfig(BaseModel):
     """排除规则配置"""
-    
+
     # 要跳过的目录名（不进入子目录扫描）
     dirs: list[str] = Field(default_factory=list)
     # 要排除的文件模式（glob 模式）
@@ -185,27 +185,27 @@ def load_config(config_path: str = "config.yaml") -> Settings:
 def get_merged_exclude(vault: VaultConfig, global_exclude: ExcludeConfig) -> ExcludeConfig:
     """
     合并 vault 级排除规则与全局排除规则
-    
+
     :param vault: 仓库配置
     :param global_exclude: 全局排除规则
     :return: 合并后的排除规则
-    
+
     规则：
     - dirs: vault 级覆盖全局（如果 vault 有定义）
     - patterns: 合并全局 + vault 级
     """
     if vault.exclude is None:
         return global_exclude
-    
+
     # 合并 dirs（vault 级优先）
     if vault.exclude.dirs:
         merged_dirs = vault.exclude.dirs
     else:
         merged_dirs = global_exclude.dirs
-    
+
     # 合并 patterns（去重）
     merged_patterns = list(set(global_exclude.patterns + vault.exclude.patterns))
-    
+
     return ExcludeConfig(dirs=merged_dirs, patterns=merged_patterns)
 
 
