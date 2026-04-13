@@ -17,16 +17,16 @@ from typing import Any
 _script_dir = Path(__file__).parent.resolve()
 sys.path.insert(0, str(_script_dir))
 
-import jieba
+import jieba  # noqa: E402
 
-from chunker.markdown_splitter import MarkdownSplitter
-from config import get_merged_exclude, load_config
-from embedder.embed_engine import EmbeddingEngine
-from scanner.scan_engine import DEFAULT_SKIP_DIRS, Scanner
-from storage.database import DatabaseManager
-from utils.logger import logger, setup_logger
+from chunker.markdown_splitter import MarkdownSplitter  # noqa: E402
+from config import load_config  # noqa: E402
+from embedder.embed_engine import EmbeddingEngine  # noqa: E402
+from scanner.scan_engine import DEFAULT_SKIP_DIRS, Scanner  # noqa: E402
+from storage.database import DatabaseManager  # noqa: E402
+from utils.logger import logger, setup_logger  # noqa: E402
 
-setup_logger(level="INFO", log_file=str(_script_dir / "logs" / "build_index.log"))
+setup_logger(level="INFO")
 
 _jieba_dict_loaded = False
 
@@ -147,7 +147,7 @@ def process_and_commit_batch(
     texts = [c[1].content for c in chunks]
     embeddings = embedder.embed(texts)
 
-    for idx, ((file_id, chunk, f_path), emb) in enumerate(zip(chunks, embeddings)):
+    for idx, ((file_id, chunk, f_path), emb) in enumerate(zip(chunks, embeddings, strict=False)):
         chunk_idx = start_idx + idx
         metadata_json = json.dumps(chunk.metadata or {}, ensure_ascii=False, default=json_serialize)
         confidence_json = json.dumps(chunk.confidence_metadata or {}, ensure_ascii=False, default=json_serialize)
@@ -245,7 +245,10 @@ def main():
     if args.force:
         logger.info("🔄 模式：强制重建所有索引")
         db.conn.execute("DELETE FROM fts5_index")
-        db.conn.execute("DELETE FROM vectors")
+        # 检查 vectors 表是否存在（sqlite-vec 可能未安装）
+        cursor = db.conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='vectors'")
+        if cursor.fetchone():
+            db.conn.execute("DELETE FROM vectors")
         db.conn.execute("DELETE FROM chunks")
         db.conn.execute("DELETE FROM files")
         db.conn.commit()
@@ -346,8 +349,7 @@ def main():
 
     elapsed = time.time() - start_time
     logger.success(
-        f"🎉 索引构建完成！共处理 {total_files_with_chunks} 个文件，"
-        f"{total_processed} 个 chunks，耗时：{elapsed:.2f}s"
+        f"🎉 索引构建完成！共处理 {total_files_with_chunks} 个文件，{total_processed} 个 chunks，耗时：{elapsed:.2f}s"
     )
     db.close()
 

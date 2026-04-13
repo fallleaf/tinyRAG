@@ -20,7 +20,7 @@ from utils.logger import logger, setup_logger  # noqa: E402
 
 # 初始化日志
 _script_dir = os.path.dirname(os.path.abspath(__file__))
-setup_logger(level="INFO", log_file=os.path.join(_script_dir, "logs", "vacuum.log"))
+setup_logger(level="INFO")
 
 
 def check_vacuum_needed(db: DatabaseManager, config) -> dict:

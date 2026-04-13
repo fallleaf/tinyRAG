@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 # embedder/embed_engine.py - 批量向量化引擎 (P0/P1 修复版)
 import time
+
 from utils.logger import logger
+
 from .model_factory import EmbeddingModel
 
 

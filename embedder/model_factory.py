@@ -7,9 +7,9 @@ from utils.logger import logger
 
 try:
     from fastembed import TextEmbedding
-except ImportError:
+except ImportError as e:
     logger.error("❌ fastembed 未安装，请运行: pip install fastembed")
-    raise ImportError("fastembed not found")
+    raise ImportError("fastembed not found") from e
 
 
 class EmbeddingModel:

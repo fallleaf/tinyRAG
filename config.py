@@ -23,6 +23,12 @@ class ExcludeConfig(BaseModel):
     # 要排除的文件模式（glob 模式）
     patterns: list[str] = Field(default_factory=list)
 
+    @field_validator("dirs", "patterns", mode="before")
+    @classmethod
+    def none_to_empty_list(cls, v):
+        """将 None 转换为空列表（处理 YAML 空值）"""
+        return v if v is not None else []
+
 
 class VaultConfig(BaseModel):
     """仓库配置单元"""

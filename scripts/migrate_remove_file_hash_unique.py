@@ -16,7 +16,6 @@ import argparse
 import os
 import shutil
 import sqlite3
-import time
 from datetime import datetime
 
 
@@ -90,8 +89,8 @@ def migrate_database(db_path: str, backup: bool = True) -> bool:
         # 2. 复制数据
         print("  2️⃣ 复制数据...")
         cursor.execute("""
-            INSERT INTO files_new 
-            SELECT id, vault_name, file_path, absolute_path, file_hash, 
+            INSERT INTO files_new
+            SELECT id, vault_name, file_path, absolute_path, file_hash,
                    file_size, mtime, is_deleted, created_at, updated_at
             FROM files
         """)

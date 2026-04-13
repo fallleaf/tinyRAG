@@ -323,7 +323,7 @@ class Scanner:
                 logger.info(f"➕ 检测到新文件：{rel_path}")
 
         # ═══ 阶段 2c：删除检测 — 未被匹配为移动源的消失文件 ═══
-        for abs_path, meta in disappeared.items():
+        for _abs_path, meta in disappeared.items():
             report.deleted_files.append(meta["id"])
             logger.info(f"🗑️ 检测到文件删除：{meta['vault_name']}/{meta['file_path']}")
 

@@ -32,7 +32,7 @@ from storage.database import DatabaseManager  # noqa: E402
 from utils.logger import setup_logger  # noqa: E402
 
 # 修复 L6: 使用绝对路径，避免依赖 CWD
-logger = setup_logger(level="INFO", log_file=str(script_dir / "logs" / "cli.log"))
+logger = setup_logger(level="INFO")
 
 
 def cmd_status(args):
@@ -209,6 +209,70 @@ def cmd_search(args):
 def cmd_config(args):
     """显示或编辑配置"""
     config_path = script_dir / "config.yaml"
+
+    # 默认行为：显示配置概览
+    if not args.show and not args.edit and not args.validate and not args.parsed:
+        try:
+            cfg = load_config(str(config_path))
+            print("\n⚙️ tinyRAG 配置概览\n")
+            print("=" * 60)
+
+            # 仓库配置
+            print("\n📂 仓库配置:")
+            for v in cfg.vaults:
+                status = "✅ 启用" if v.enabled else "⏸️ 禁用"
+                exclude_info = ""
+                if v.exclude:
+                    dirs_count = len(v.exclude.dirs)
+                    patterns_count = len(v.exclude.patterns)
+                    if dirs_count or patterns_count:
+                        exclude_info = f" (排除: {dirs_count} 目录, {patterns_count} 模式)"
+                print(f"   {status} {v.name}: {v.path}{exclude_info}")
+
+            # 模型配置
+            print("\n🤖 嵌入模型:")
+            print(f"   名称: {cfg.embedding_model.name}")
+            print(f"   维度: {cfg.embedding_model.dimensions}")
+            print(f"   批大小: {cfg.embedding_model.batch_size}")
+            print(f"   缓存目录: {cfg.embedding_model.cache_dir}")
+
+            # 分块配置
+            print("\n✂️ 分块配置:")
+            print(f"   最大 Token: {cfg.chunking.max_tokens}")
+            print(f"   重叠 Token: {cfg.chunking.overlap}")
+            print(f"   Token 模式: {cfg.chunking.token_mode}")
+
+            # 检索配置
+            print("\n🔍 检索配置:")
+            print(f"   Alpha (语义权重): {cfg.retrieval.get('alpha', 0.7)}")
+            print(f"   Beta (关键词权重): {cfg.retrieval.get('beta', 0.3)}")
+
+            # 置信度配置
+            print("\n📊 置信度权重:")
+            print(f"   文档类型: {list(cfg.confidence.doc_type_rules.keys()) or '(默认)'}")
+            print(f"   状态类型: {list(cfg.confidence.status_rules.keys())}")
+            print(f"   日期衰减: {'启用' if cfg.confidence.date_decay.enabled else '禁用'}")
+            if cfg.confidence.date_decay.enabled:
+                print(f"   半衰期: {cfg.confidence.date_decay.half_life_days} 天")
+
+            # 全局排除规则
+            print("\n🚫 全局排除规则:")
+            print(f"   目录: {cfg.exclude.dirs[:5]}{'...' if len(cfg.exclude.dirs) > 5 else ''}")
+            print(f"   模式: {cfg.exclude.patterns[:5]}{'...' if len(cfg.exclude.patterns) > 5 else ''}")
+
+            # 数据库
+            print("\n🗄️ 数据库:")
+            print(f"   路径: {cfg.db_path}")
+            print(f"   缓存: {cfg.cache.db_path}")
+
+            print("\n" + "=" * 60)
+            print("💡 使用 --show 查看原始 YAML, --parsed 查看解析后配置, --validate 验证配置")
+            return 0
+        except Exception as e:
+            logger.error(f"❌ 配置加载失败: {e}")
+            return 1
+
+    # 显示原始 YAML
     if args.show:
         if config_path.exists():
             print("\n📄 配置文件 (config.yaml):\n")
@@ -216,12 +280,98 @@ def cmd_config(args):
         else:
             print(f"❌ 配置文件不存在: {config_path}")
         return 0
-    elif args.edit:
-        import subprocess
 
-        editor = os.environ.get("EDITOR", "vim")
+    # 显示解析后的配置
+    if args.parsed:
+        try:
+            cfg = load_config(str(config_path))
+            import json
+            from pydantic import TypeAdapter
+
+            # 使用 Pydantic 序列化
+            adapter = TypeAdapter(type(cfg))
+            data = adapter.dump_python(cfg, mode='json')
+            print("\n📋 解析后的配置 (JSON):\n")
+            print(json.dumps(data, indent=2, ensure_ascii=False))
+        except Exception as e:
+            logger.error(f"❌ 配置解析失败: {e}")
+            return 1
+        return 0
+
+    # 验证配置
+    if args.validate:
+        try:
+            cfg = load_config(str(config_path))
+            print("\n✅ 配置验证通过!\n")
+
+            # 检查仓库路径
+            print("📂 仓库路径检查:")
+            for v in cfg.vaults:
+                v_path = Path(v.path).expanduser()
+                if v_path.exists():
+                    print(f"   ✅ {v.name}: {v.path}")
+                else:
+                    print(f"   ⚠️ {v.name}: {v.path} (路径不存在)")
+
+            # 检查数据库路径
+            print("\n🗄️ 数据库路径检查:")
+            db_path = Path(cfg.db_path).expanduser()
+            db_dir = db_path.parent
+            if db_dir.exists():
+                print(f"   ✅ 数据库目录存在: {db_dir}")
+            else:
+                print(f"   ⚠️ 数据库目录不存在: {db_dir} (首次运行将自动创建)")
+
+            # 检查 jieba 词典
+            if cfg.jieba_user_dict:
+                dict_path = Path(cfg.jieba_user_dict).expanduser()
+                if dict_path.exists():
+                    print(f"   ✅ jieba 词典: {dict_path}")
+                else:
+                    print(f"   ⚠️ jieba 词典不存在: {dict_path}")
+
+            return 0
+        except Exception as e:
+            print(f"\n❌ 配置验证失败: {e}\n")
+            return 1
+
+    # 编辑配置
+    if args.edit:
+        if not config_path.exists():
+            print(f"❌ 配置文件不存在: {config_path}")
+            return 1
+        import subprocess
+        import shutil
+
+        # 尝试多个编辑器（按优先级）
+        editors = [
+            os.environ.get("EDITOR"),  # 环境变量优先
+            os.environ.get("VISUAL"),  # VISUAL 也是标准环境变量
+            "nano",                    # 最常见的简单编辑器
+            "vim",                     # Vim
+            "vi",                      # 基础 vi
+            "code",                    # VS Code
+            "gedit",                   # GNOME 编辑器
+        ]
+
+        editor = None
+        for e in editors:
+            if e and shutil.which(e):
+                editor = e
+                break
+
+        if not editor:
+            print("❌ 未找到可用编辑器！")
+            print("💡 请设置 EDITOR 环境变量或安装编辑器:")
+            print("   export EDITOR=nano  # 或 vim, code 等")
+            print("   sudo apt install nano  # 安装 nano")
+            print(f"\n📄 或者直接编辑: {config_path}")
+            return 1
+
+        print(f"📝 使用编辑器: {editor}")
         subprocess.run([editor, str(config_path)])
         return 0
+
     return 1
 
 
@@ -239,9 +389,12 @@ def main():
   python rag_cli.py search "日记" --mode keyword --vaults personal
   # 查看系统状态
   python rag_cli.py status
-  # 查看/编辑配置
-  python rag_cli.py config --show
-  python rag_cli.py config --edit
+  # 配置管理
+  python rag_cli.py config                # 显示配置概览
+  python rag_cli.py config --show         # 显示原始 YAML
+  python rag_cli.py config --parsed       # 显示解析后的 JSON
+  python rag_cli.py config --validate     # 验证配置
+  python rag_cli.py config --edit         # 编辑配置文件
 """,
     )
     subparsers = parser.add_subparsers(dest="command", help="可用命令")
@@ -264,8 +417,10 @@ def main():
     sp_status.set_defaults(func=cmd_status)
 
     sp_config = subparsers.add_parser("config", help="管理配置")
-    sp_config.add_argument("--show", action="store_true", help="显示配置")
-    sp_config.add_argument("--edit", action="store_true", help="编辑配置")
+    sp_config.add_argument("--show", action="store_true", help="显示原始 YAML 配置")
+    sp_config.add_argument("--parsed", action="store_true", help="显示解析后的配置 (JSON)")
+    sp_config.add_argument("--validate", action="store_true", help="验证配置并检查路径")
+    sp_config.add_argument("--edit", action="store_true", help="编辑配置文件")
     sp_config.set_defaults(func=cmd_config)
 
     args = parser.parse_args()

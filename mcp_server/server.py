@@ -31,14 +31,14 @@ try:
     from mcp.server import Server
     from mcp.server.stdio import stdio_server
     from mcp.types import (
-        TextContent,
-        Tool,
-        Resource,
-        ResourceTemplate,
+        GetPromptResult,
         Prompt,
         PromptArgument,
         PromptMessage,
-        GetPromptResult,
+        Resource,
+        ResourceTemplate,
+        TextContent,
+        Tool,
     )
 
     MCP_AVAILABLE = True
@@ -46,7 +46,7 @@ except ImportError:
     MCP_AVAILABLE = False
 
 from chunker.markdown_splitter import MarkdownSplitter
-from config import Settings, get_merged_exclude, load_config
+from config import Settings, load_config
 from embedder.embed_engine import EmbeddingEngine
 from retriever.hybrid_engine import HybridEngine
 from scanner.scan_engine import Scanner
@@ -56,8 +56,7 @@ from storage.database import DatabaseManager
 # Logger & Config
 # =====================
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
-log_file = PROJECT_ROOT / "logs" / "mcp_server.log"
-logger = setup_logger(level="INFO", log_file=str(log_file))
+logger = setup_logger(level="INFO")
 
 _BUILD_INDEX_MODULE_KEY = "_tinyrag_build_index"
 
@@ -330,7 +329,7 @@ class ScanTool(BaseTool):
                 continue
 
             try:
-                for idx, ((file_id, chunk, f_path), emb) in enumerate(zip(batch, embeddings)):
+                for idx, ((file_id, chunk, f_path), emb) in enumerate(zip(batch, embeddings, strict=False)):
                     global_idx = processed + idx
                     metadata_json = json.dumps(chunk.metadata or {}, ensure_ascii=False, default=_json_serialize)
                     confidence_json = json.dumps(
@@ -520,7 +519,11 @@ class ResourceManager:
         ).fetchall()
 
         chunks_total = db.conn.execute("SELECT COUNT(*) FROM chunks WHERE is_deleted = 0").fetchone()[0]
-        vectors_total = db.conn.execute("SELECT COUNT(*) FROM vectors").fetchone()[0]
+        # 修复：vectors 表可能不存在（sqlite-vec 未安装时）
+        try:
+            vectors_total = db.conn.execute("SELECT COUNT(*) FROM vectors").fetchone()[0]
+        except Exception:
+            vectors_total = 0
 
         db_size = os.path.getsize(self.ctx.config.db_path) if self.ctx.config.db_path else 0
 
@@ -596,16 +599,16 @@ class ResourceManager:
         ).fetchone()[0]
 
         recent_files = db.conn.execute(
-            """SELECT file_path, mtime, file_size FROM files 
-               WHERE vault_name = ? AND is_deleted = 0 
+            """SELECT file_path, mtime, file_size FROM files
+               WHERE vault_name = ? AND is_deleted = 0
                ORDER BY updated_at DESC LIMIT 10""",
             (vault_name,),
         ).fetchall()
 
         doc_types = db.conn.execute(
-            """SELECT json_extract(confidence_json, '$.doc_type') as doc_type, COUNT(*) as cnt 
-               FROM chunks c JOIN files f ON c.file_id = f.id 
-               WHERE f.vault_name = ? AND c.is_deleted = 0 
+            """SELECT json_extract(confidence_json, '$.doc_type') as doc_type, COUNT(*) as cnt
+               FROM chunks c JOIN files f ON c.file_id = f.id
+               WHERE f.vault_name = ? AND c.is_deleted = 0
                GROUP BY doc_type""",
             (vault_name,),
         ).fetchall()
@@ -638,7 +641,7 @@ class ResourceManager:
             return json.dumps({"error": f"File not found: {file_id}"})
 
         try:
-            with open(row["absolute_path"], "r", encoding="utf-8") as f:
+            with open(row["absolute_path"], encoding="utf-8") as f:
                 content = f.read()
         except Exception as e:
             content = f"[Error reading file: {e}]"
@@ -664,9 +667,9 @@ class ResourceManager:
             return json.dumps({"error": "Invalid file_id, must be integer"})
 
         chunks = self.ctx.db.conn.execute(
-            """SELECT c.id, c.chunk_index, c.content, c.content_type, c.section_title, 
+            """SELECT c.id, c.chunk_index, c.content, c.content_type, c.section_title,
                       c.section_path, c.confidence_json
-               FROM chunks c WHERE c.file_id = ? AND c.is_deleted = 0 
+               FROM chunks c WHERE c.file_id = ? AND c.is_deleted = 0
                ORDER BY c.chunk_index""",
             (fid,),
         ).fetchall()
@@ -697,11 +700,82 @@ class ResourceManager:
 # =====================
 # Prompts 实现
 # =====================
+# 提示词模板目录
+PROMPTS_DIR = PROJECT_ROOT / "prompts"
+
+# 内置默认提示词（当文件不存在时使用）
+DEFAULT_PROMPT_SEARCH = """你是一个知识库助手。请基于以下检索结果回答用户问题。
+
+## 用户问题
+{{query}}
+
+## 知识库检索结果
+{{context}}
+
+## 回答要求
+1. 仅基于检索结果回答，不要编造信息
+2. 如果检索结果不足，明确说明
+3. 引用文档时标注来源（如：【文档 1】）
+4. 如果有多个相关观点，综合呈现
+
+## 回答"""
+
+DEFAULT_PROMPT_SUMMARIZE = """请总结以下文档的核心内容。
+
+## 文档信息
+- 路径: {{file_path}}
+- 类型: {{doc_type}}
+- 状态: {{status}}
+- 日期: {{final_date}}
+
+## 文档内容
+{{content}}
+
+## 摘要要求
+1. 提炼核心观点（3-5 条）
+2. 说明文档的主要价值
+3. 指出适用场景
+
+## 摘要"""
+
+
+def _load_prompt_template(filename: str, default_template: str) -> str:
+    """
+    加载提示词模板文件
+
+    Args:
+        filename: 模板文件名（如 prompt_search_with_context.md）
+        default_template: 默认模板（文件不存在时使用）
+
+    Returns:
+        模板字符串（包含 {{placeholder}} 格式的变量）
+    """
+    template_path = PROMPTS_DIR / filename
+    if template_path.exists():
+        try:
+            content = template_path.read_text(encoding="utf-8")
+            logger.debug(f"✅ 已加载提示词模板: {filename}")
+            return content
+        except Exception as e:
+            logger.warning(f"⚠️ 加载提示词模板失败 {filename}: {e}，使用默认模板")
+            return default_template
+    else:
+        logger.info(f"ℹ️ 提示词模板不存在 {filename}，使用默认模板")
+        return default_template
+
+
 class PromptManager:
     """MCP Prompts 管理器"""
 
     def __init__(self, ctx: AppContext):
         self.ctx = ctx
+        # 加载提示词模板
+        self._template_search = _load_prompt_template(
+            "prompt_search_with_context.md", DEFAULT_PROMPT_SEARCH
+        )
+        self._template_summarize = _load_prompt_template(
+            "prompt_summarize_document.md", DEFAULT_PROMPT_SUMMARIZE
+        )
 
     def list_prompts(self) -> list[Prompt]:
         return [
@@ -744,6 +818,22 @@ class PromptManager:
         else:
             raise ValueError(f"Unknown prompt: {name}")
 
+    def _render_template(self, template: str, variables: dict[str, str]) -> str:
+        """
+        渲染模板，替换 {{variable}} 格式的占位符
+
+        Args:
+            template: 包含 {{placeholder}} 的模板字符串
+            variables: 变量字典
+
+        Returns:
+            渲染后的字符串
+        """
+        result = template
+        for key, value in variables.items():
+            result = result.replace(f"{{{{{key}}}}}", str(value))
+        return result
+
     def _prompt_search_with_context(self, args: dict[str, str]) -> GetPromptResult:
         query = args.get("query", "")
         top_k = int(args.get("top_k", "5"))
@@ -760,21 +850,14 @@ class PromptManager:
 
         context = "\n".join(context_parts) if context_parts else "未找到相关文档"
 
-        prompt_text = f"""你是一个知识库助手。请基于以下检索结果回答用户问题。
-
-## 用户问题
-{query}
-
-## 知识库检索结果
-{context}
-
-## 回答要求
-1. 仅基于检索结果回答，不要编造信息
-2. 如果检索结果不足，明确说明
-3. 引用文档时标注来源（如：【文档 1】）
-4. 如果有多个相关观点，综合呈现
-
-## 回答"""
+        # 使用模板渲染
+        prompt_text = self._render_template(
+            self._template_search,
+            {
+                "query": query,
+                "context": context,
+            },
+        )
 
         return GetPromptResult(
             description=f"检索增强回答: {query}",
@@ -841,23 +924,17 @@ class PromptManager:
                 except json.JSONDecodeError:
                     pass
 
-            prompt_text = f"""请总结以下文档的核心内容。
-
-## 文档信息
-- 路径: {actual_file_path}
-- 类型: {confidence.get('doc_type', 'unknown')}
-- 状态: {confidence.get('status', 'unknown')}
-- 日期: {confidence.get('final_date', 'unknown')}
-
-## 文档内容
-{content[:8000]}
-
-## 摘要要求
-1. 提炼核心观点（3-5 条）
-2. 说明文档的主要价值
-3. 指出适用场景
-
-## 摘要"""
+            # 使用模板渲染
+            prompt_text = self._render_template(
+                self._template_summarize,
+                {
+                    "file_path": actual_file_path,
+                    "doc_type": confidence.get("doc_type", "unknown"),
+                    "status": confidence.get("status", "unknown"),
+                    "final_date": confidence.get("final_date", "unknown"),
+                    "content": content[:8000],
+                },
+            )
 
         return GetPromptResult(
             description=f"文档摘要: {file_path}",

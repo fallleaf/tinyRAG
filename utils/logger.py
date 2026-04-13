@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 
-def setup_logger(level: str = "INFO", log_file: str = "logs/app.log"):
+def setup_logger(level: str = "INFO", log_file: str = "logs/tinyRAG.log"):
     """
     配置 Loguru 日志：
     1. 移除默认处理器

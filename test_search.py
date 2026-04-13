@@ -5,7 +5,6 @@ test_search.py - 测试 tinyRAG 搜索功能
 """
 
 import argparse
-import asyncio
 import sys
 from pathlib import Path
 
@@ -13,10 +12,10 @@ from pathlib import Path
 script_dir = Path(__file__).parent.resolve()
 sys.path.insert(0, str(script_dir))
 
-from config import load_config
-from embedder.embed_engine import EmbeddingEngine
-from retriever.hybrid_engine import HybridEngine
-from storage.database import DatabaseManager
+from config import load_config  # noqa: E402
+from embedder.embed_engine import EmbeddingEngine  # noqa: E402
+from retriever.hybrid_engine import HybridEngine  # noqa: E402
+from storage.database import DatabaseManager  # noqa: E402
 
 
 def test_search(query: str, top_k: int = 10, mode: str = "hybrid"):
@@ -49,7 +48,7 @@ def test_search(query: str, top_k: int = 10, mode: str = "hybrid"):
     elif mode == "semantic":
         alpha, beta = 1.0, 0.0
     else:
-        alpha, beta = 0.7, 0.3
+        alpha, beta = None, None
 
     # 构建 vault_filter（修复后）
     vaults = [v.name for v in cfg.vaults if v.enabled]

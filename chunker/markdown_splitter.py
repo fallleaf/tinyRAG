@@ -160,9 +160,7 @@ class MarkdownSplitter:
                     )
                 ]
             # 极端超长，需要切分
-            logger.warning(
-                f"⚠️ {c_type.value} 类型 chunk 严重超限 " f"({token_count} > {self.max_tokens * 2})，强制切分"
-            )
+            logger.warning(f"⚠️ {c_type.value} 类型 chunk 严重超限 ({token_count} > {self.max_tokens * 2})，强制切分")
 
         # TEXT/HEADER 类型 或 极端超长的 CODE/TABLE/LIST：按句子边界切分
         chunks = []
