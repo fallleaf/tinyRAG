@@ -77,86 +77,141 @@ def main():
     parser.add_argument("--force", action="store_true", help="重建所有索引")
     parser.add_argument("--batch-size", type=int, default=128, help="向量化批大小")
     args = parser.parse_args()
-    try: config = load_config("config.yaml")
-    except Exception as e: logger.critical(f"❌ 配置加载失败：{e}"); sys.exit(1)
-    
+    try:
+        config = load_config("config.yaml")
+    except Exception as e:
+        logger.critical(f"❌ 配置加载失败：{e}")
+        sys.exit(1)
+
     load_jieba_user_dict(config)
     db = DatabaseManager(config.db_path, vec_dimension=config.embedding_model.dimensions)
     global_skip_dirs = DEFAULT_SKIP_DIRS | frozenset(config.exclude.dirs)
     scanner = Scanner(db, skip_dirs=global_skip_dirs, global_patterns=config.exclude.patterns)
     splitter = MarkdownSplitter(config)
-    embedder = EmbeddingEngine(model_name=config.embedding_model.name, cache_dir=config.embedding_model.cache_dir, batch_size=config.embedding_model.batch_size, unload_after_seconds=config.embedding_model.unload_after_seconds)
-    
+    embedder = EmbeddingEngine(
+        model_name=config.embedding_model.name,
+        cache_dir=config.embedding_model.cache_dir,
+        batch_size=config.embedding_model.batch_size,
+        unload_after_seconds=config.embedding_model.unload_after_seconds,
+    )
+
     vault_configs = [(v.name, v.path) for v in config.vaults if v.enabled]
-    if not vault_configs: logger.warning("⚠️ 未启用任何仓库"); db.close(); return
+    if not vault_configs:
+        logger.warning("⚠️ 未启用任何仓库，跳过扫描")
+        db.close()
+        return
+
     vault_excludes: dict[str, tuple[frozenset[str], list[str]]] = {}
     for v in config.vaults:
         if v.enabled:
-            if v.exclude: vault_excludes[v.name] = (frozenset(v.exclude.dirs), v.exclude.patterns)
-            else: vault_excludes[v.name] = (frozenset(), [])
+            vault_excludes[v.name] = (frozenset(v.exclude.dirs), v.exclude.patterns) if v.exclude else (frozenset(), [])
 
     files_to_index = []
     if args.force:
         logger.info("🔄 模式：强制重建所有索引")
         db.conn.execute("DELETE FROM fts5_index")
-        if db.conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='vectors'").fetchone(): db.conn.execute("DELETE FROM vectors")
-        db.conn.execute("DELETE FROM chunks"); db.conn.execute("DELETE FROM files")
+        cursor = db.conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='vectors'")
+        if cursor.fetchone():
+            db.conn.execute("DELETE FROM vectors")
+        db.conn.execute("DELETE FROM chunks")
+        db.conn.execute("DELETE FROM files")
         db.conn.commit()
         report = scanner.scan_vaults(vault_configs, vault_excludes)
-        for meta in report.new_files: db.upsert_file(meta.to_dict())
+        for meta in report.new_files:
+            db.upsert_file(meta.to_dict())
         db.conn.commit()
         files_to_index = [dict(row) for row in db.conn.execute("SELECT id, absolute_path, file_path, mtime FROM files WHERE is_deleted = 0").fetchall()]
     else:
+        # ✅ 增量模式逻辑重构
         report = scanner.scan_vaults(vault_configs, vault_excludes)
         scanner.process_report(report)
+
         changed_paths = [f.absolute_path for f in report.new_files + report.modified_files]
         changed_paths.extend([f.new_absolute_path for f in report.moved_files])
+
         if changed_paths:
             placeholders = ",".join(["?"] * len(changed_paths))
-            files_to_index = [dict(row) for row in db.conn.execute(f"SELECT id, absolute_path, file_path, mtime FROM files WHERE absolute_path IN ({placeholders})", changed_paths).fetchall()]
-        missing = [dict(row) for row in db.conn.execute("SELECT f.id, f.absolute_path, f.file_path, f.mtime FROM files f WHERE f.is_deleted = 0 AND NOT EXISTS (SELECT 1 FROM chunks c WHERE c.file_id = f.id) LIMIT 1000").fetchall()]
-        if missing: logger.info(f"⚠️ 补充 {len(missing)} 个缺失 chunks"); files_to_index.extend(missing)
-        if not files_to_index: logger.info("✨ 无变更，跳过构建"); db.close(); return
+            cursor = db.conn.execute(
+                f"SELECT id, absolute_path, file_path, mtime FROM files WHERE absolute_path IN ({placeholders})",
+                changed_paths,
+            )
+            files_to_index = [dict(row) for row in cursor.fetchall()]
+
+        # 🔧 精准自愈：仅在无变更时检查缺失 chunks，并过滤空文件
+        if not files_to_index:
+            cursor = db.conn.execute("""
+                SELECT f.id, f.vault_name, f.absolute_path, f.file_path, f.mtime 
+                FROM files f 
+                WHERE f.is_deleted = 0 
+                  AND NOT EXISTS (SELECT 1 FROM chunks c WHERE c.file_id = f.id) 
+                LIMIT 1000
+            """)
+            missing = [dict(row) for row in cursor.fetchall()]
+        if missing:
+            # 格式化文件标识：vault名称 / 相对路径
+            missing_display = [f"{m['vault_name']}/{m['file_path']}" for m in missing]
+
+            # 智能日志：数量少时全列，数量多时截断防刷屏
+            if len(missing) <= 5:
+                logger.info(f"🔧 发现 {len(missing)} 个已注册但无索引的文件，准备补充: {', '.join(missing_display)}")
+            else:
+                logger.info(f"🔧 发现 {len(missing)} 个已注册但无索引的文件，准备补充 (前5个): {', '.join(missing_display[:5])} ...")
+
+            files_to_index.extend(missing)
+        if not files_to_index:
+            logger.info("✨ 索引已是最新，无需更新。")
+            db.close()
+            return
 
     stream_batch_size = getattr(config, "stream_batch_size", 100)
     max_concurrent_files = getattr(config, "max_concurrent_files", os.cpu_count() or 4)
     logger.info(f"🚀 开始处理 {len(files_to_index)} 个文件...")
-    
+    logger.info(f"⚙️ 配置: batch={config.embedding_model.batch_size}, stream_batch={stream_batch_size}, workers={max_concurrent_files}")
+
     pending_chunks: list[tuple[int, Any, str]] = []
     total_processed = 0
     global_chunk_idx = 0
     total_files_with_chunks = 0
     start_time = time.time()
-    
+
     try:
         from tqdm import tqdm
         pbar = tqdm(total=len(files_to_index), desc="文件处理", unit="文件", file=sys.stdout, leave=True)
     except ImportError:
         pbar = None
 
-    db.begin_bulk_insert()
     try:
         with ThreadPoolExecutor(max_workers=max_concurrent_files) as executor:
             for f_id, chunks, f_path in executor.map(lambda f: process_file_worker(f, splitter), files_to_index):
-                for c in chunks: pending_chunks.append((f_id, c, f_path))
-                if chunks: total_files_with_chunks += 1
+                for c in chunks:
+                    pending_chunks.append((f_id, c, f_path))
+                if chunks:
+                    total_files_with_chunks += 1
                 if len(pending_chunks) >= stream_batch_size:
-                    global_chunk_idx = process_and_commit_batch(pending_chunks, embedder, db, global_chunk_idx, commit=False)
+                    global_chunk_idx = process_and_commit_batch(pending_chunks, embedder, db, global_chunk_idx)
                     total_processed += len(pending_chunks)
                     pending_chunks.clear()
-                if pbar: pbar.update(1)
+                if pbar:
+                    pbar.update(1)
         if pending_chunks:
-            global_chunk_idx = process_and_commit_batch(pending_chunks, embedder, db, global_chunk_idx, commit=False)
+            global_chunk_idx = process_and_commit_batch(pending_chunks, embedder, db, global_chunk_idx)
             total_processed += len(pending_chunks)
-        db.end_bulk_insert(commit=True)
+            pending_chunks.clear()
     except Exception as e:
-        db.end_bulk_insert(commit=False)
         logger.error(f"❌ 索引构建失败: {e}", exc_info=True)
         if pbar: pbar.close()
         db.close()
         sys.exit(1)
+
     if pbar: pbar.close()
-    logger.success(f"🎉 构建完成！处理 {total_files_with_chunks} 文件，{total_processed} chunks，耗时：{time.time()-start_time:.2f}s")
+    elapsed = time.time() - start_time
+
+    # ✅ 结果校验：避免“处理了文件但实际无内容可索引”的歧义日志
+    if total_processed == 0 and total_files_with_chunks == 0:
+        logger.warning("⚠️ 已扫描指定文件，但内容为空或全部被排除规则过滤，未生成新索引。")
+    else:
+        logger.success(f"🎉 构建完成！处理 {total_files_with_chunks} 个有效文件，{total_processed} 个 chunks，耗时：{elapsed:.2f}s")
+
     db.close()
 
 if __name__ == "__main__":
