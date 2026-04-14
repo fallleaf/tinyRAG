@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
-# scanner/scan_engine.py - 文件扫描引擎 (v2.1)
+# scanner/scan_engine.py - 文件扫描引擎 (v2.2)
 """
+v2.2 修复内容:
+- 修复 process_report 中对相同 hash 文件的处理逻辑
+- 同一 vault 内允许不同路径的相同内容文件（复制文件）
+- 不再基于 hash 跳过新文件，而是基于路径判断
+
 v2.1 优化内容:
 1. ✅ 支持 per-vault 排除规则
 2. ✅ 支持 glob 模式匹配排除文件
@@ -334,6 +339,9 @@ class Scanner:
         """
         将 ScanReport 持久化到数据库。
         包含 FTS5 / vectors 联动清理，确保删除/修改操作不残留孤立数据。
+
+        v2.2 修复: 同一 vault 内允许不同路径的相同内容文件（复制文件），
+        不再基于 hash 跳过新文件，而是基于路径判断是否需要恢复软删除记录。
         """
         total = (
             len(report.new_files)
@@ -349,32 +357,38 @@ class Scanner:
         try:
             # ── 新增文件 ──────────────────────────────────
             for meta in report.new_files:
-                # 修复 L4: 传入 vault_name 参数，避免跨 vault 恢复错绑
-                existing = self.db.find_file_by_hash(meta.file_hash, include_deleted=True, vault_name=meta.vault_name)
-                if existing and existing["is_deleted"] == 1:
-                    # 恢复已软删除的记录（避免重复 INSERT + 保留历史关联）
+                # 修复 L4 + v2.2: 优先检查相同路径的软删除记录，而非基于 hash 跳过
+                # 这样可以正确处理同一 vault 内不同路径的相同内容文件（复制文件）
+                cursor = self.db.conn.execute(
+                    "SELECT id, is_deleted FROM files WHERE absolute_path = ?",
+                    (meta.absolute_path,),
+                )
+                path_existing = cursor.fetchone()
+
+                if path_existing and path_existing["is_deleted"] == 1:
+                    # 路径匹配的软删除记录 → 恢复
                     self.db.conn.execute(
                         """UPDATE files SET
-                           vault_name=?, file_path=?, absolute_path=?,
+                           vault_name=?, file_path=?,
                            file_hash=?, file_size=?, mtime=?,
                            is_deleted=0, updated_at=?
                            WHERE id=?""",
                         (
                             meta.vault_name,
                             meta.file_path,
-                            meta.absolute_path,
                             meta.file_hash,
                             meta.file_size,
                             meta.mtime,
                             int(time.time()),
-                            existing["id"],
+                            path_existing["id"],
                         ),
                     )
                     logger.debug(f"♻️ 恢复软删除记录：{meta.file_path}")
-                elif existing and existing["is_deleted"] == 0:
-                    # Hash 已存在且未删除 → 可能是复制文件，跳过避免重复
-                    logger.debug(f"⚠️ 跳过重复 Hash 文件：{meta.file_path}")
+                elif path_existing and path_existing["is_deleted"] == 0:
+                    # 路径已存在且未删除 → 不应该出现在 new_files 中，跳过
+                    logger.debug(f"⏭️ 路径已存在，跳过：{meta.file_path}")
                 else:
+                    # 新路径 → 直接插入（允许相同 hash 的不同路径文件）
                     self.db.upsert_file(meta.to_dict())
 
             # ── 修改文件（含 FTS5/vectors 联动清理）─────────

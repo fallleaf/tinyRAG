@@ -1,15 +1,27 @@
 #!/usr/bin/env python3
 """
-mcp_server/server.py - Production MCP RAG Server (v1.1.2)
+mcp_server/server.py - Production MCP RAG Server (v1.1.6)
 
-tinyRAG v1.1.2 稳定版本功能:
-1. ✅ Tools 接口: search, scan_index, rebuild_index
-2. ✅ Resources 接口: 知识库统计信息、文档内容
-3. ✅ Prompts 接口: 检索增强提示词模板
+tinyRAG v1.1.6 精简版本功能:
+1. ✅ Tools 接口: search, scan_index, rebuild_index, stats, config
+2. ✅ Resources 接口: vault/{name}, file/{id}, chunks/{id}
+3. ✅ Prompts 接口: search_with_context, summarize_document
 
-修复记录:
+v1.1.6 更新:
+- 新增 config Tool，替代 tinyrag://config Resource
+- 移除所有静态 Resources（stats/config），统一使用 Tools
+
+设计原则:
+- 以 Tools 为主：LLM 调用 Tools 更直接便捷
+- Resources 仅保留模板资源（Tool 无能力的功能）
+
+历史修复记录:
 - F1: read_resource 的 uri 参数 AnyUrl 类型转换
 - F2: summarize_document 路径多级匹配策略
+- F3: read_resource 返回 ReadResourceResult 而非字符串 (MCP 协议规范)
+- F4: 新增 stats Tool，便于 LLM 直接调用获取统计信息
+- F5: 精简重复项，移除 tinyrag://stats Resource
+- F6: 新增 config Tool，移除 tinyrag://config Resource
 """
 
 import asyncio
@@ -35,9 +47,11 @@ try:
         Prompt,
         PromptArgument,
         PromptMessage,
+        ReadResourceResult,
         Resource,
         ResourceTemplate,
         TextContent,
+        TextResourceContents,
         Tool,
     )
 
@@ -429,30 +443,112 @@ class RebuildTool(BaseTool):
             raise
 
 
+class StatsTool(BaseTool):
+    """获取知识库统计信息（Tool 形式，便于 LLM 调用）"""
+
+    name, description = "stats", "Get knowledge base statistics (tinyRAG): 文件数、分块数、向量数、存储大小等"
+    schema: ClassVar[dict] = {"type": "object", "properties": {}}
+
+    async def run(self, args: dict[str, Any]) -> dict[str, Any]:
+        await self.ctx.initialize()
+        db = self.ctx.db
+
+        files_total = db.conn.execute("SELECT COUNT(*) FROM files WHERE is_deleted = 0").fetchone()[0]
+        files_by_vault = db.conn.execute(
+            "SELECT vault_name, COUNT(*) as cnt FROM files WHERE is_deleted = 0 GROUP BY vault_name"
+        ).fetchall()
+
+        chunks_total = db.conn.execute("SELECT COUNT(*) FROM chunks WHERE is_deleted = 0").fetchone()[0]
+        try:
+            vectors_total = db.conn.execute("SELECT COUNT(*) FROM vectors").fetchone()[0]
+        except Exception:
+            vectors_total = 0
+
+        db_size = os.path.getsize(self.ctx.config.db_path) if self.ctx.config.db_path else 0
+
+        return {
+            "files": {
+                "total": files_total,
+                "by_vault": {row["vault_name"]: row["cnt"] for row in files_by_vault},
+            },
+            "chunks": {
+                "total": chunks_total,
+                "avg_per_file": round(chunks_total / max(files_total, 1), 1),
+            },
+            "vectors": {
+                "total": vectors_total,
+                "dimensions": self.ctx.config.embedding_model.dimensions,
+            },
+            "storage": {
+                "db_size_mb": round(db_size / 1024 / 1024, 2),
+                "db_path": self.ctx.config.db_path,
+            },
+            "model": {
+                "name": self.ctx.config.embedding_model.name,
+                "size": self.ctx.config.embedding_model.size,
+            },
+        }
+
+
+class ConfigTool(BaseTool):
+    """获取配置信息（Tool 形式，便于 LLM 调用）"""
+
+    name, description = "config", "Get tinyRAG configuration (tinyRAG): 模型配置、vault 配置、检索参数等"
+    schema: ClassVar[dict] = {"type": "object", "properties": {}}
+
+    async def run(self, args: dict[str, Any]) -> dict[str, Any]:
+        await self.ctx.initialize()
+        cfg = self.ctx.config
+
+        return {
+            "vaults": [
+                {
+                    "name": v.name,
+                    "path": v.path,
+                    "enabled": v.enabled,
+                    "exclude": v.exclude.model_dump() if v.exclude else None,
+                }
+                for v in cfg.vaults
+            ],
+            "embedding_model": {
+                "name": cfg.embedding_model.name,
+                "dimensions": cfg.embedding_model.dimensions,
+                "batch_size": cfg.embedding_model.batch_size,
+            },
+            "chunking": cfg.chunking.model_dump() if hasattr(cfg.chunking, 'model_dump') else cfg.chunking,
+            "confidence": {
+                "doc_type_rules": cfg.confidence.doc_type_rules,
+                "status_rules": cfg.confidence.status_rules,
+                "date_decay": {
+                    "enabled": cfg.confidence.date_decay.enabled,
+                    "half_life_days": cfg.confidence.date_decay.half_life_days,
+                    "type_specific": cfg.confidence.date_decay.type_specific_decay,
+                },
+            },
+            "retrieval": cfg.retrieval.model_dump() if hasattr(cfg.retrieval, 'model_dump') else cfg.retrieval,
+            "exclude": cfg.exclude.model_dump(),
+        }
+
+
 # =====================
-# Resources 实现
+# Resources 实现（精简版：stats/config 已移至 Tools）
 # =====================
 class ResourceManager:
-    """MCP Resources 管理器"""
+    """MCP Resources 管理器
+
+    注意：stats 和 config 已移至 Tools，避免重复。
+    Resources 保留以下功能：
+    - vault/{name}: Vault 统计（Tool 无此功能）
+    - file/{id}: 文件内容（Tool 无此功能）
+    - chunks/{id}: 文件分块（Tool 无此功能）
+    """
 
     def __init__(self, ctx: AppContext):
         self.ctx = ctx
 
     def list_resources(self) -> list[Resource]:
-        return [
-            Resource(
-                uri="tinyrag://stats",
-                name="Knowledge Base Statistics",
-                description="知识库统计信息：文件数、分块数、vault 配置等",
-                mimeType="application/json",
-            ),
-            Resource(
-                uri="tinyrag://config",
-                name="tinyRAG Configuration",
-                description="当前配置信息：模型、权重、排除规则等",
-                mimeType="application/json",
-            ),
-        ]
+        """静态资源列表（stats/config 已移至 Tool，避免重复）"""
+        return []  # 无静态资源，仅有模板资源
 
     def list_resource_templates(self) -> list[ResourceTemplate]:
         return [
@@ -476,115 +572,46 @@ class ResourceManager:
             ),
         ]
 
-    async def read_resource(self, uri: Any) -> str:
+    async def read_resource(self, uri: Any) -> ReadResourceResult:
         """
         读取资源内容
         注意：uri 参数是 AnyUrl 类型，需要转换为字符串
+        返回 ReadResourceResult，符合 MCP 协议规范
+
+        已移除 tinyrag://stats 和 tinyrag://config（请使用 stats/config Tool）
         """
         await self.ctx.initialize()
 
         # 🔧 F1: 将 AnyUrl 转换为字符串
         uri_str = str(uri)
-
-        # 静态资源
-        if uri_str == "tinyrag://stats":
-            return self._get_stats()
-
-        if uri_str == "tinyrag://config":
-            return self._get_config()
+        logger.info(f"📖 read_resource 调用，收到 URI: {uri_str} (类型: {type(uri).__name__})")
+        content = ""
 
         # 模板资源：tinyrag://vault/{vault_name}
         if uri_str.startswith("tinyrag://vault/"):
             vault_name = uri_str.split("/")[-1]
-            return self._get_vault_stats(vault_name)
-
+            content = self._get_vault_stats(vault_name)
         # 模板资源：tinyrag://file/{file_id}
-        if uri_str.startswith("tinyrag://file/"):
+        elif uri_str.startswith("tinyrag://file/"):
             file_id = uri_str.split("/")[-1]
-            return self._get_file_content(file_id)
-
+            content = self._get_file_content(file_id)
         # 模板资源：tinyrag://chunks/{file_id}
-        if uri_str.startswith("tinyrag://chunks/"):
+        elif uri_str.startswith("tinyrag://chunks/"):
             file_id = uri_str.split("/")[-1]
-            return self._get_file_chunks(file_id)
+            content = self._get_file_chunks(file_id)
+        else:
+            raise ValueError(f"Unknown resource URI: {uri_str}")
 
-        raise ValueError(f"Unknown resource URI: {uri_str}")
-
-    def _get_stats(self) -> str:
-        db = self.ctx.db
-
-        files_total = db.conn.execute("SELECT COUNT(*) FROM files WHERE is_deleted = 0").fetchone()[0]
-        files_by_vault = db.conn.execute(
-            "SELECT vault_name, COUNT(*) as cnt FROM files WHERE is_deleted = 0 GROUP BY vault_name"
-        ).fetchall()
-
-        chunks_total = db.conn.execute("SELECT COUNT(*) FROM chunks WHERE is_deleted = 0").fetchone()[0]
-        # 修复：vectors 表可能不存在（sqlite-vec 未安装时）
-        try:
-            vectors_total = db.conn.execute("SELECT COUNT(*) FROM vectors").fetchone()[0]
-        except Exception:
-            vectors_total = 0
-
-        db_size = os.path.getsize(self.ctx.config.db_path) if self.ctx.config.db_path else 0
-
-        stats = {
-            "files": {
-                "total": files_total,
-                "by_vault": {row["vault_name"]: row["cnt"] for row in files_by_vault},
-            },
-            "chunks": {
-                "total": chunks_total,
-                "avg_per_file": round(chunks_total / max(files_total, 1), 1),
-            },
-            "vectors": {
-                "total": vectors_total,
-                "dimensions": self.ctx.config.embedding_model.dimensions,
-            },
-            "storage": {
-                "db_size_mb": round(db_size / 1024 / 1024, 2),
-                "db_path": self.ctx.config.db_path,
-            },
-            "model": {
-                "name": self.ctx.config.embedding_model.name,
-                "size": self.ctx.config.embedding_model.size,
-            },
-        }
-
-        return json.dumps(stats, ensure_ascii=False, indent=2)
-
-    def _get_config(self) -> str:
-        cfg = self.ctx.config
-
-        config_info = {
-            "vaults": [
-                {
-                    "name": v.name,
-                    "path": v.path,
-                    "enabled": v.enabled,
-                    "exclude": v.exclude.model_dump() if v.exclude else None,
-                }
-                for v in cfg.vaults
-            ],
-            "embedding_model": {
-                "name": cfg.embedding_model.name,
-                "dimensions": cfg.embedding_model.dimensions,
-                "batch_size": cfg.embedding_model.batch_size,
-            },
-            "chunking": cfg.chunking,
-            "confidence": {
-                "doc_type_rules": cfg.confidence.doc_type_rules,
-                "status_rules": cfg.confidence.status_rules,
-                "date_decay": {
-                    "enabled": cfg.confidence.date_decay.enabled,
-                    "half_life_days": cfg.confidence.date_decay.half_life_days,
-                    "type_specific": cfg.confidence.date_decay.type_specific_decay,
-                },
-            },
-            "retrieval": cfg.retrieval,
-            "exclude": cfg.exclude.model_dump(),
-        }
-
-        return json.dumps(config_info, ensure_ascii=False, indent=2)
+        # 🔧 F3: 返回符合 MCP 协议的 ReadResourceResult
+        return ReadResourceResult(
+            contents=[
+                TextResourceContents(
+                    uri=uri_str,
+                    mimeType="application/json",
+                    text=content,
+                )
+            ]
+        )
 
     def _get_vault_stats(self, vault_name: str) -> str:
         db = self.ctx.db
@@ -754,7 +781,7 @@ def _load_prompt_template(filename: str, default_template: str) -> str:
     if template_path.exists():
         try:
             content = template_path.read_text(encoding="utf-8")
-            logger.debug(f"✅ 已加载提示词模板: {filename}")
+            logger.info(f"✅ 已加载提示词模板: {filename}")
             return content
         except Exception as e:
             logger.warning(f"⚠️ 加载提示词模板失败 {filename}: {e}，使用默认模板")
@@ -1037,7 +1064,20 @@ class ToolRegistry:
 
 
 class RagServer:
-    """tinyRAG MCP Server v1.1.2: Tools + Resources + Prompts"""
+    """tinyRAG MCP Server v1.1.6: Tools + Resources + Prompts
+
+    Tools (推荐使用，LLM 可直接调用):
+    - search: 混合检索（语义+关键词+RRF融合）
+    - scan_index: 增量扫描更新索引
+    - rebuild_index: 强制重建索引
+    - stats: 知识库统计信息
+    - config: 配置信息
+
+    Resources (模板资源，Tool 无能力的功能):
+    - tinyrag://vault/{name}: Vault 统计
+    - tinyrag://file/{id}: 文件内容
+    - tinyrag://chunks/{id}: 文件分块
+    """
 
     def __init__(self):
         self.ctx = AppContext()
@@ -1045,6 +1085,8 @@ class RagServer:
         self.registry.register(SearchTool)
         self.registry.register(ScanTool)
         self.registry.register(RebuildTool)
+        self.registry.register(StatsTool)
+        self.registry.register(ConfigTool)
 
         self.resource_manager = ResourceManager(self.ctx)
         self.prompt_manager = PromptManager(self.ctx)
@@ -1093,7 +1135,7 @@ class RagServer:
         if not MCP_AVAILABLE:
             logger.error("Please install mcp: pip install mcp")
             return
-        logger.info("MCP Stdio Server v1.1.2 starting (Tools + Resources + Prompts)...")
+        logger.info("MCP Stdio Server v1.1.4 starting (Tools + Resources + Prompts)...")
         try:
             async with stdio_server() as (r, w):
                 await self.server.run(r, w, self.server.create_initialization_options())

@@ -160,7 +160,9 @@ class DatabaseManager:
         插入或更新文件记录 (UPSERT)
         ⚠️ 重要：此方法不执行 commit，事务控制权交由调用方 (如 scan_engine.process_report)
 
-        修复：处理旧版 schema 中 file_hash UNIQUE 约束冲突
+        修复 v2.2:
+        - 兼容旧版 schema (file_hash UNIQUE 约束)
+        - 提示用户运行迁移脚本以支持相同 hash 的不同路径文件
         """
         try:
             cursor = self.conn.execute(
@@ -186,9 +188,16 @@ class DatabaseManager:
             row = cursor.fetchone()
             return row["id"] if row else -1
         except sqlite3.IntegrityError as e:
+            error_msg = str(e)
             # 处理旧版 schema 的 file_hash UNIQUE 约束冲突
-            if "file_hash" in str(e):
-                logger.warning(f"⚠️ 跳过重复 Hash 文件（旧 schema 约束）：{file_meta['file_path']}")
+            if "file_hash" in error_msg or "files.file_hash" in error_msg:
+                logger.warning(
+                    f"⚠️ 数据库 schema 版本过旧，无法存储相同内容的不同路径文件：{file_meta['file_path']}"
+                )
+                logger.warning(
+                    "💡 请运行迁移脚本：python scripts/migrate_remove_file_hash_unique.py"
+                )
+                # 返回 -1 表示跳过，但提示用户迁移
                 return -1
             raise
         except Exception as e:

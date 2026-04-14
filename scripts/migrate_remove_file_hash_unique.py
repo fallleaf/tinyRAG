@@ -1,150 +1,144 @@
 #!/usr/bin/env python3
 """
-数据库迁移脚本：移除 files.file_hash 的 UNIQUE 约束
+迁移脚本：移除 files 表的 file_hash UNIQUE 约束
 
-SQLite 不支持 ALTER TABLE DROP CONSTRAINT，需要通过重建表的方式迁移。
+背景：
+- 旧版 schema 中 file_hash 有 UNIQUE 约束
+- 新版 schema (v0.3.3) 移除了该约束，允许同一 vault 内不同路径的相同内容文件
 
-使用方法:
-    python scripts/migrate_remove_file_hash_unique.py /path/to/tinyrag.db
+使用方法：
+  python scripts/migrate_remove_file_hash_unique.py
 
 注意：
-1. 执行前请备份数据库
-2. 执行时确保没有其他进程在使用数据库
+- 此迁移会重建 files 表，但保留所有数据
+- 如果有大量数据，可能需要几分钟
 """
 
-import argparse
-import os
-import shutil
 import sqlite3
-from datetime import datetime
+import sys
+import time
+from pathlib import Path
+
+# 添加项目根目录到 sys.path
+script_dir = Path(__file__).parent.parent.resolve()
+sys.path.insert(0, str(script_dir))
+
+from config import load_config
+from utils.logger import setup_logger
+
+logger = setup_logger(level="INFO")
 
 
-def check_has_unique_constraint(conn: sqlite3.Connection) -> bool:
-    """检查 files 表是否有 file_hash UNIQUE 约束"""
+def check_old_schema(conn: sqlite3.Connection) -> bool:
+    """检查是否存在旧的 file_hash UNIQUE 约束"""
     cursor = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='files'")
     row = cursor.fetchone()
     if not row:
         return False
 
-    sql = row[0].upper()
+    schema = row[0]
     # 检查是否有 file_hash UNIQUE 约束
-    return "FILE_HASH TEXT UNIQUE" in sql or "UNIQUE (FILE_HASH)" in sql
+    return "file_hash TEXT NOT NULL UNIQUE" in schema or "file_hash UNIQUE" in schema
 
 
-def migrate_database(db_path: str, backup: bool = True) -> bool:
-    """
-    迁移数据库，移除 file_hash UNIQUE 约束
+def migrate(conn: sqlite3.Connection):
+    """执行迁移：重建 files 表"""
+    logger.info("开始迁移...")
 
-    :param db_path: 数据库文件路径
-    :param backup: 是否创建备份
-    :return: 迁移是否成功
-    """
-    print(f"📂 数据库路径: {db_path}")
+    # 1. 创建临时表（新版 schema，无 file_hash UNIQUE）
+    logger.info("步骤 1/5: 创建临时表...")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS files_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            vault_name TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            absolute_path TEXT NOT NULL,
+            file_hash TEXT NOT NULL,
+            file_size INTEGER,
+            mtime INTEGER,
+            is_deleted INTEGER DEFAULT 0,
+            created_at INTEGER DEFAULT (strftime('%s', 'now')),
+            updated_at INTEGER DEFAULT (strftime('%s', 'now')),
+            UNIQUE(vault_name, file_path)
+        )
+    """)
 
-    if not os.path.exists(db_path):
-        print(f"❌ 数据库文件不存在: {db_path}")
-        return False
+    # 2. 复制数据到临时表
+    logger.info("步骤 2/5: 复制数据到临时表...")
+    conn.execute("""
+        INSERT INTO files_new (id, vault_name, file_path, absolute_path, file_hash, file_size, mtime, is_deleted, created_at, updated_at)
+        SELECT id, vault_name, file_path, absolute_path, file_hash, file_size, mtime, is_deleted, created_at, updated_at
+        FROM files
+    """)
 
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
+    # 3. 删除旧表
+    logger.info("步骤 3/5: 删除旧表...")
+    conn.execute("DROP TABLE files")
 
-    # 检查是否需要迁移
-    if not check_has_unique_constraint(conn):
-        print("✅ 数据库已经是新版 schema，无需迁移")
-        conn.close()
-        return True
+    # 4. 重命名临时表
+    logger.info("步骤 4/5: 重命名临时表...")
+    conn.execute("ALTER TABLE files_new RENAME TO files")
 
-    print("⚠️ 检测到旧版 schema，file_hash 有 UNIQUE 约束")
+    # 5. 重建索引
+    logger.info("步骤 5/5: 重建索引...")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_files_hash ON files(file_hash)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_files_vault ON files(vault_name)")
 
-    # 创建备份
-    if backup:
-        backup_path = f"{db_path}.backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        shutil.copy2(db_path, backup_path)
-        print(f"📦 已创建备份: {backup_path}")
-
-    try:
-        print("🚀 开始迁移...")
-
-        # 在事务中执行迁移
-        cursor = conn.cursor()
-
-        # 1. 创建新表（无 UNIQUE 约束）
-        print("  1️⃣ 创建新表结构...")
-        cursor.execute("""
-            CREATE TABLE files_new (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                vault_name TEXT NOT NULL,
-                file_path TEXT NOT NULL,
-                absolute_path TEXT NOT NULL,
-                file_hash TEXT NOT NULL,
-                file_size INTEGER,
-                mtime INTEGER,
-                is_deleted INTEGER DEFAULT 0,
-                created_at INTEGER DEFAULT (strftime('%s', 'now')),
-                updated_at INTEGER DEFAULT (strftime('%s', 'now')),
-                UNIQUE(vault_name, file_path)
-            )
-        """)
-
-        # 2. 复制数据
-        print("  2️⃣ 复制数据...")
-        cursor.execute("""
-            INSERT INTO files_new
-            SELECT id, vault_name, file_path, absolute_path, file_hash,
-                   file_size, mtime, is_deleted, created_at, updated_at
-            FROM files
-        """)
-
-        # 3. 删除旧表
-        print("  3️⃣ 删除旧表...")
-        cursor.execute("DROP TABLE files")
-
-        # 4. 重命名新表
-        print("  4️⃣ 重命名新表...")
-        cursor.execute("ALTER TABLE files_new RENAME TO files")
-
-        # 5. 重建索引
-        print("  5️⃣ 重建索引...")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_files_hash ON files(file_hash)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_files_vault ON files(vault_name)")
-
-        # 提交事务
-        conn.commit()
-
-        print("✅ 迁移完成！file_hash UNIQUE 约束已移除")
-
-        # 验证
-        if check_has_unique_constraint(conn):
-            print("❌ 验证失败：约束仍然存在")
-            return False
-
-        print("✅ 验证通过：约束已成功移除")
-        return True
-
-    except Exception as e:
-        conn.rollback()
-        print(f"❌ 迁移失败: {e}")
-        print("💡 请从备份恢复数据库")
-        return False
-    finally:
-        conn.close()
+    conn.commit()
+    logger.success("✅ 迁移完成！")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="移除 files.file_hash UNIQUE 约束的数据库迁移脚本")
-    parser.add_argument("db_path", help="SQLite 数据库文件路径")
-    parser.add_argument("--no-backup", action="store_true", help="跳过备份步骤（不推荐）")
+    try:
+        config = load_config(str(script_dir / "config.yaml"))
+        db_path = config.db_path
 
-    args = parser.parse_args()
+        if not Path(db_path).exists():
+            logger.error(f"❌ 数据库文件不存在: {db_path}")
+            return 1
 
-    success = migrate_database(args.db_path, backup=not args.no_backup)
+        logger.info(f"📂 数据库路径: {db_path}")
 
-    if success:
-        print("\n🎉 迁移成功！现在可以使用 tinyRAG v1.1.2 了")
-    else:
-        print("\n💥 迁移失败，请检查错误信息")
-        exit(1)
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+
+        # 检查是否需要迁移
+        if not check_old_schema(conn):
+            logger.info("✅ 数据库已是新版 schema，无需迁移")
+            conn.close()
+            return 0
+
+        logger.warning("⚠️ 检测到旧版 schema，需要迁移")
+
+        # 统计数据量
+        cursor = conn.execute("SELECT COUNT(*) FROM files")
+        file_count = cursor.fetchone()[0]
+        logger.info(f"📊 当前文件记录数: {file_count}")
+
+        if file_count > 0:
+            # 执行迁移
+            start_time = time.time()
+            migrate(conn)
+            elapsed = time.time() - start_time
+            logger.info(f"⏱️ 迁移耗时: {elapsed:.2f}s")
+
+            # 验证迁移结果
+            cursor = conn.execute("SELECT COUNT(*) FROM files")
+            new_count = cursor.fetchone()[0]
+            logger.info(f"✅ 迁移后文件记录数: {new_count}")
+
+            if new_count != file_count:
+                logger.error(f"❌ 数据丢失！原 {file_count} 条，现 {new_count} 条")
+                return 1
+
+        conn.close()
+        logger.success("🎉 迁移成功！现在可以重新运行 build_index.py")
+        return 0
+
+    except Exception as e:
+        logger.error(f"❌ 迁移失败: {e}", exc_info=True)
+        return 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

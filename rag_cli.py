@@ -286,6 +286,7 @@ def cmd_config(args):
         try:
             cfg = load_config(str(config_path))
             import json
+
             from pydantic import TypeAdapter
 
             # 使用 Pydantic 序列化
@@ -340,8 +341,8 @@ def cmd_config(args):
         if not config_path.exists():
             print(f"❌ 配置文件不存在: {config_path}")
             return 1
-        import subprocess
         import shutil
+        import subprocess
 
         # 尝试多个编辑器（按优先级）
         editors = [
