@@ -168,7 +168,7 @@ class Scanner:
         :param vault_excludes: {vault_name: (skip_dirs, exclude_patterns), ...}
         :return: {absolute_path: (vault_name, rel_path, mtime, file_size)}
         """
-        disk_files: dict[str, tuple[str, str, int, int]] = {}
+        disk_files = {}
         vault_excludes = vault_excludes or {}
 
         for vault_name, vault_path in vault_configs:
@@ -177,51 +177,29 @@ class Scanner:
                 logger.warning(f"⚠️ Vault 路径不存在：{vault_path}")
                 continue
 
-            # 获取该 vault 的排除规则
             vault_skip_dirs, vault_patterns = vault_excludes.get(vault_name, (frozenset(), []))
-            # 日志：只显示 vault 自身的排除规则（不包含全局）
-            if vault_skip_dirs or vault_patterns:
-                exclude_info = []
-                if vault_skip_dirs:
-                    exclude_info.append(f"目录={list(vault_skip_dirs)}")
-                if vault_patterns:
-                    exclude_info.append(f"模式={vault_patterns}")
-                logger.info(f"📂 扫描 {vault_name}: vault 级排除 {', '.join(exclude_info)}")
-            else:
-                logger.info(f"📂 扫描 {vault_name}")
 
-            # 合并全局跳过目录和 vault 级跳过目录
+            # 合并规则：全局 + Vault 级
             all_skip_dirs = self._skip_dirs | vault_skip_dirs
-            # 合并全局和 vault 级 patterns
             all_patterns = list(set(self._global_patterns + vault_patterns))
 
+            # ✅ 增强日志：明确显示最终生效的排除规则
+            logger.info(f"📂 扫描 {vault_name}")
+            logger.info(f"   🚫 生效排除目录: {sorted(list(all_skip_dirs))}")
+            if all_patterns:
+                logger.info(f"   🚫 生效排除模式: {sorted(all_patterns)[:5]}... (共{len(all_patterns)}条)")
             for root, dirs, files in os.walk(vault_path):
-                # 就地过滤：阻止 os.walk 递归进入排除目录
                 dirs[:] = sorted(d for d in dirs if d not in all_skip_dirs)
-
                 for fname in sorted(files):
-                    if not fname.endswith(".md"):
-                        continue
-
+                    if not fname.endswith(".md"): continue
                     abs_path = os.path.join(root, fname)
                     rel_path = os.path.relpath(abs_path, vault_path)
-
-                    # 检查文件模式排除规则（合并后的）
-                    if all_patterns and self._match_patterns(rel_path, all_patterns):
-                        logger.debug(f"⏭️ 排除文件（模式匹配）：{rel_path}")
-                        continue
-
+                    if all_patterns and self._match_patterns(rel_path, all_patterns): continue
                     try:
                         stat = os.stat(abs_path)
-                        disk_files[abs_path] = (
-                            vault_name,
-                            rel_path,
-                            int(stat.st_mtime),
-                            stat.st_size,
-                        )
+                        disk_files[abs_path] = (vault_name, rel_path, int(stat.st_mtime), stat.st_size)
                     except OSError as e:
                         logger.warning(f"⚠️ 无法读取文件状态：{abs_path} - {e}")
-
         return disk_files
 
     def scan_vaults(
