@@ -140,19 +140,19 @@ confidence:
   # Frontmatter status 权重 (文档状态 - 5 种基础类型)
   status_rules:
     # 1. published（已发布）- 正式发布的文档
-    "published": 1.2
-    "已发布": 1.2
+    published: 1.2
+    已发布: 1.2
     # 2. completed（已完成）- 已完成的任务/项目
-    "completed": 1.1
-    "已完成": 1.1
+    completed: 1.1
+    已完成: 1.1
     # 3. active（进行中）- 正在进行的工作
-    "active": 0.9
-    "编写中": 0.9
+    active: 0.9
+    编写中: 0.9
     # 4. draft（草稿）- 初稿/未完成
-    "draft": 0.7
+    draft: 0.7
     # 5. archived（已归档）- 历史归档/废弃文档
-    "archived": 0.5
-    "存档": 0.5
+    archived: 0.5
+    存档: 0.5
   # 日期衰减: 越新的文档权重越高
   date_decay:
     enabled: true
