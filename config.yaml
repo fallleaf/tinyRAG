@@ -1,0 +1,201 @@
+# config.yaml
+# tinyRAG 核心配置文件
+
+# 知识库仓库路径 (支持多个)
+vaults:
+  - path: "/home/fallleaf/NanobotMemory"
+    name: personal
+    enabled: true
+    exclude:
+      dirs:
+  - path: "/home/fallleaf/Obsidian"
+    name: work
+    enabled: true
+    exclude:
+      dirs:
+        - "copilot"
+        - "99.模板"
+        - "Excalidraw"
+        - "98.附件"
+# 全局排除规则（所有 vault 共享，除非 vault 自己定义了 exclude.dirs）
+exclude:
+  dirs:                        # 默认跳过的目录名
+    - ".git"                   # Git 仓库
+    - ".obsidian"              # Obsidian 配置
+    - ".trash"                 # 回收站
+    - "node_modules"           # Node.js 依赖
+    - "__pycache__"            # Python 缓存
+    - ".venv"                  # Python 虚拟环境
+    - "venv"                   # Python 虚拟环境
+    - ".idea"                  # JetBrains IDE
+    - ".vscode"                # VS Code
+    - ".ruff_cache"            # Ruff 缓存
+    - ".mypy_cache"            # MyPy 缓存
+    - ".pytest_cache"          # Pytest 缓存
+    - "dist"                   # 构建输出
+    - "build"                  # 构建输出
+    - "*.egg-info"             # Python 包信息
+  patterns:                    # 默认排除的文件模式
+    - ".*"                     # 隐藏文件
+    - "*.tmp"                  # 临时文件
+    - "*.bak"                  # 备份文件
+    - "*.swp"                  # Vim 交换文件
+    - "*.swo"                  # Vim 交换文件
+    - "*~"                     # 备份文件
+    - "*.pyc"                  # Python 字节码
+    - "*.pyo"                  # Python 优化字节码
+    - "*.exe"                  # 可执行文件
+    - "*.dll"                  # 动态库
+    - "*.so"                   # 共享库
+    - "*.dylib"                # macOS 动态库
+    - "*.zip"                  # 压缩文件
+    - "*.tar*"                 # 压缩文件
+    - "*.gz"                   # 压缩文件
+    - "*.rar"                  # 压缩文件
+    - "*.7z"                   # 压缩文件
+    - "*.pdf"                  # PDF 文件
+    - "*.doc"                  # Word 文档
+    - "*.docx"                 # Word 文档
+    - "*.xls"                  # Excel 文件
+    - "*.xlsx"                 # Excel 文件
+    - "*.ppt"                  # PowerPoint
+    - "*.pptx"                 # PowerPoint
+    - "*.jpg"                  # 图片
+    - "*.jpeg"                 # 图片
+    - "*.png"                  # 图片
+    - "*.gif"                  # 图片
+    - "*.bmp"                  # 图片
+    - "*.ico"                  # 图标
+    - "*.svg"                  # SVG 图片
+    - "*.mp3"                  # 音频
+    - "*.mp4"                  # 视频
+    - "*.avi"                  # 视频
+    - "*.mov"                  # 视频
+    - "*.wav"                  # 音频
+    - "*.flac"                 # 音频
+    - "*.db"                   # 数据库文件
+    - "*.sqlite"               # 数据库文件
+    - "*.sqlite3"              # 数据库文件
+    - "*.log"                  # 日志文件
+    - "package-lock.json"      # 锁文件
+    - "yarn.lock"              # 锁文件
+    - "pnpm-lock.yaml"         # 锁文件
+    - "Cargo.lock"             # 锁文件
+    - "poetry.lock"            # 锁文件
+
+
+# 数据库配置
+db_path: "./data/rag.db"
+
+# 嵌入模型配置
+embedding_model:
+  name: "BAAI/bge-small-zh-v1.5"
+  cache_dir: "~/.cache/fastembed"
+  size: "small"
+  dimensions: 512
+  batch_size: 32  # 向量化批大小
+  unload_after_seconds: 300
+
+# 分块配置
+chunking:
+  max_tokens: 512
+  overlap: 50
+  # Token 计算模式:
+  # - "estimate": 估算模式（区分中英文，无额外依赖）
+  # - "tiktoken": 精确模式（需要 pip install tiktoken）
+  token_mode: "tiktoken"
+  # 估算模式参数 (仅在 token_mode="estimate" 时生效)
+  # 中文约 1.5 字符/token (实测 GPT/Cl100k 编码)
+  chinese_chars_per_token: 1.5
+  # 英文/符号约 4.0 字符/token
+  english_chars_per_token: 4.0
+  # max_chars 保守系数 (用于快速预判断)
+  max_chars_multiplier: 2.5
+
+# 置信度与融合权重 (v2.0 - Frontmatter 驱动)
+# 权重计算: final_weight = doc_type_weight × status_weight × date_weight
+# 未匹配字段使用 default_weight
+confidence:
+  # chunk 内容类型权重 (用于检索期动态计算)
+  type_rules:
+    code: 1.1
+    table: 1.05
+    header: 1.0
+    text: 0.95
+    list: 0.9
+  # Frontmatter doc_type 权重 (文档分类 - 5 种基础类型)
+  # 所有文档类型映射到以下 5 种基础类型
+  doc_type_rules:
+    # 1. official（正式文档）- 政策、标准、正式报告、验收纪要等
+    official: 1.2           # 权重最高，长期有效
+    # 2. project（项目文档）- 项目、计划、工作、会议、报告等
+    project: 1.15           # 权重较高，中期有效
+    # 3. technical（技术文档）- 技术、博客、笔记等
+    technical: 1.1          # 权重较高，长期有效
+    # 4. personal（个人文档）- 日记、闪念、收集、任务等
+    dairy: 0.9             # 权重中等，短期有效
+    blog: 0.9
+    # 5. archive（归档文档）- 归档、模板、图片、数据等
+    archive: 0.7            # 权重较低，快速衰减
+  # Frontmatter status 权重 (文档状态 - 5 种基础类型)
+  status_rules:
+    # 1. published（已发布）- 正式发布的文档
+    "published": 1.2
+    "已发布": 1.2
+    # 2. completed（已完成）- 已完成的任务/项目
+    "completed": 1.1
+    "已完成": 1.1
+    # 3. active（进行中）- 正在进行的工作
+    "active": 0.9
+    "编写中": 0.9
+    # 4. draft（草稿）- 初稿/未完成
+    "draft": 0.7
+    # 5. archived（已归档）- 历史归档/废弃文档
+    "archived": 0.5
+    "存档": 0.5
+  # 日期衰减: 越新的文档权重越高
+  date_decay:
+    enabled: true
+    half_life_days: 365    # 默认半衰期 1 年
+    min_weight: 0.5        # 衰减下限
+    # 按文档类型差异化衰减（天）- 5 种基础类型
+    type_specific_decay:
+      # 1. official（正式文档）- 长期有效
+      official: 1825        # 5 年半衰期（政策、标准、正式报告）
+      # 2. project（项目文档）- 中期有效
+      project: 730          # 2 年半衰期（项目、计划、工作、会议、报告）
+      # 3. technical（技术文档）- 长期有效
+      technical: 1095       # 3 年半衰期（技术、博客、笔记）
+      # 4. personal（个人文档）- 短期有效
+      personal: 180         # 6 个月半衰期（日记、闪念、收集、任务）
+      diary: 180
+      # 5. archive（归档文档）- 快速衰减
+      archive: 90           # 3 个月半衰期（归档、模板、图片、数据）
+  # 未匹配时的默认权重
+  default_weight: 1.0
+
+# 日志级别
+log_level: "INFO"
+
+# 数据库维护策略
+maintenance:
+  soft_delete_threshold: 0.2
+  auto_vacuum: true
+
+# 缓存配置
+cache:
+  db_path: "./data/cache.db"
+  ttl_seconds: 36000        # 缓存过期时间（秒）
+  max_entries: 1000         # 最大缓存条目数
+
+# 检索引擎融合权重 (HybridEngine 读取)
+retrieval:
+  alpha: 0.7
+  beta: 0.3
+
+# jieba 分词自定义词典（留空则使用默认词典）
+jieba_user_dict: "data/jieba_user_dict.txt"
+
+# 流式处理配置（内存优化）
+stream_batch_size: 128  # 每累积多少 chunks 进行一次向量化入库
+max_concurrent_files: 2  # 并行处理文件数的上限，低内存设备建议设为 1-2
