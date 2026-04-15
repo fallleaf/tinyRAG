@@ -274,10 +274,11 @@ def cmd_index(args):
 
     if args.action == "build":
         print("🔄 触发全量索引重建...")
-        # 安全调用 build_index.main()
+        # ✅ 修复：build 命令默认强制全量重建，无需手动加 --force
+        import sys
         old_argv = sys.argv
         try:
-            sys.argv = ["build_index"] + (["--force"] if args.force else [])
+            sys.argv = ["build_index", "--force"]
             build_mod.main()
         except SystemExit as e:
             return e.code
@@ -307,7 +308,6 @@ def cmd_index(args):
         finally:
             db.close()
     return 0
-
 
 def cmd_maintenance(args):
     """数据库运维 (vacuum / soft-delete 清理)"""
