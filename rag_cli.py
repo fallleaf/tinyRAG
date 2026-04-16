@@ -24,6 +24,13 @@ import time
 from pathlib import Path
 from io import StringIO
 
+# ✅ 在 rag_cli.py 顶部导入区添加以下 4 行
+import array
+import json
+from concurrent.futures import ThreadPoolExecutor
+from chunker.markdown_splitter import MarkdownSplitter  # noqa: E402
+
+
 # 确保项目根目录在 sys.path
 script_dir = Path(__file__).parent.resolve()
 sys.path.insert(0, str(script_dir))
@@ -266,16 +273,13 @@ def cmd_config(args):
         return 0
     return 0
 
-
 def cmd_index(args):
-    """索引管理 (build / scan)"""
+    """索引管理 (build / scan) - 修复计数器与空文件诊断"""
     cfg = load_config()
     load_jieba_user_dict(cfg)
 
     if args.action == "build":
         print("🔄 触发全量索引重建...")
-        # ✅ 修复：build 命令默认强制全量重建，无需手动加 --force
-        import sys
         old_argv = sys.argv
         try:
             sys.argv = ["build_index", "--force"]
@@ -287,7 +291,7 @@ def cmd_index(args):
         return 0
 
     elif args.action == "scan":
-        print("🔍 执行增量扫描...")
+        print("🔍 执行增量扫描与索引更新...")
         db = DatabaseManager(cfg.db_path, vec_dimension=cfg.embedding_model.dimensions)
         try:
             global_skip = DEFAULT_SKIP_DIRS | frozenset(cfg.exclude.dirs)
@@ -298,16 +302,123 @@ def cmd_index(args):
                 if v.enabled:
                     vault_excludes[v.name] = (frozenset(v.exclude.dirs), v.exclude.patterns) if v.exclude else (frozenset(), [])
 
+            # 1. 扫描与元数据同步
             report = scanner.scan_vaults(vault_configs, vault_excludes)
             scanner.process_report(report)
-            print(f"✅ 增量扫描完成: {report.summary()}")
+
+            changed_paths = [f.absolute_path for f in report.new_files + report.modified_files]
+            changed_paths.extend([f.new_absolute_path for f in report.moved_files])
+
+            if not changed_paths:
+                print("   ℹ️ 扫描报告为空，无需更新。")
+                return 0
+
+            # 2. 查询待索引文件
+            placeholders = ",".join(["?"] * len(changed_paths))
+            cursor = db.conn.execute(
+                f"SELECT id, absolute_path, file_path, mtime FROM files WHERE absolute_path IN ({placeholders})",
+                changed_paths
+            )
+            files_to_index = [dict(row) for row in cursor.fetchall()]
+            if not files_to_index:
+                print("   ℹ️ 无待索引文件。")
+                return 0
+
+            print(f"   📦 发现 {len(files_to_index)} 个变更文件，开始重建索引...")
+            
+            splitter = MarkdownSplitter(cfg)
+            embed_engine = EmbeddingEngine(
+                model_name=cfg.embedding_model.name, cache_dir=cfg.embedding_model.cache_dir,
+                batch_size=cfg.embedding_model.batch_size, unload_after_seconds=cfg.embedding_model.unload_after_seconds,
+            )
+            batch_size = cfg.embedding_model.batch_size
+            pending = []
+            processed = 0
+            empty_files = 0
+            failed_files = 0
+
+            def _split_file(f):
+                p = Path(f["absolute_path"])
+                if not p.exists():
+                    return f["id"], [], f["file_path"], "文件不存在"
+                try:
+                    content = p.read_text("utf-8")
+                    chunks = splitter.split(content, f.get("mtime"))
+                    return f["id"], chunks, f["file_path"], "OK"
+                except Exception as e:
+                    return f["id"], [], f["file_path"], f"异常:{e}"
+
+            with ThreadPoolExecutor(max_workers=cfg.max_concurrent_files) as ex:
+                for fid, chunks, fp, status in ex.map(_split_file, files_to_index):
+                    if not chunks:
+                        if status != "OK":
+                            logger.warning(f"⚠️ 分块失败 {fp}: {status}")
+                            failed_files += 1
+                        empty_files += 1
+                        continue
+                        
+                    for c in chunks:
+                        pending.append((fid, c, fp))
+                    if len(pending) >= batch_size:
+                        processed += _commit_batch(pending, embed_engine, db)
+                        pending.clear()
+
+            # ✅ 修复：尾批处理计数器累加
+            if pending:
+                processed += _commit_batch(pending, embed_engine, db)
+                pending.clear()
+
+            # 📊 智能结果反馈
+            if processed == 0:
+                if empty_files == len(files_to_index):
+                    print(f"   ⚠️ 所有文件内容为空、仅含 Frontmatter 或全被过滤，未生成有效 Chunks。")
+                else:
+                    print(f"   ℹ️ 文件已处理，但未生成新 Chunks（可能内容被排除规则过滤）。")
+                if failed_files: print(f"   ❌ {failed_files} 个文件分块异常，详见日志。")
+            else:
+                print(f"   ✅ 增量重建完成：共处理 {processed} 个 chunks ({empty_files} 个空文件已跳过)")
             return 0
         except Exception as e:
-            logger.error(f"❌ 扫描失败: {e}")
+            logger.error(f"❌ 扫描失败: {e}", exc_info=True)
             return 1
         finally:
             db.close()
     return 0
+
+def _commit_batch(pending, embed_engine, db):
+    """执行单批向量化与入库，返回成功处理的 chunks 数量"""
+    from datetime import date, datetime
+    import json, array
+    if not pending: return 0
+    
+    texts = [p[1].content for p in pending]
+    try:
+        embs = embed_engine.embed(texts)
+    except Exception as e:
+        logger.error(f"❌ 批次向量化失败: {e}")
+        return 0
+
+    try:
+        db.conn.execute("PRAGMA synchronous = OFF;")
+        for (fid, chunk, fp), emb in zip(pending, embs):
+            meta_json = json.dumps(chunk.metadata or {}, default=lambda o: o.isoformat() if isinstance(o, (date,datetime)) else str(o))
+            conf_json = json.dumps(chunk.confidence_metadata or {}, default=lambda o: o.isoformat() if isinstance(o, (date,datetime)) else str(o))
+            cur = db.conn.execute(
+                "INSERT INTO chunks (file_id, chunk_index, content, content_type, section_title, section_path, start_pos, end_pos, confidence_final_weight, metadata, confidence_json) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (fid, 0, chunk.content, chunk.content_type.value, chunk.section_title, chunk.section_path, chunk.start_pos, chunk.end_pos, 1.0, meta_json, conf_json)
+            )
+            cid = cur.lastrowid
+            if db.vec_support:
+                db.conn.execute("INSERT INTO vectors (chunk_id, embedding) VALUES (?,?)", (cid, array.array("f", emb).tobytes()))
+            db.conn.execute("INSERT INTO fts5_index (rowid, content) VALUES (?,?)", (cid, build_mod.prepare_fts_content(chunk, fp)))
+        db.conn.commit()
+        return len(pending)
+    except Exception as e:
+        db.conn.rollback()
+        logger.error(f"❌ 批次提交失败：{e}")
+        return 0
+    finally:
+        db.conn.execute("PRAGMA synchronous = NORMAL;")
 
 def cmd_maintenance(args):
     """数据库运维 (vacuum / soft-delete 清理)"""
