@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-rag_cli.py - tinyRAG 命令行检索与运维工具 (v2.1)
+rag_cli.py - tinyRAG 命令行检索与运维工具 (v2.2 - 插件支持)
 功能:
-- search: 执行混合检索 (支持 console/json/csv 导出、Verbose调试)
-- status: 查看数据库和索引状态 (DB直查，毫秒级响应)
+- search: 执行混合检索 (支持 console/json/csv 导出、Verbose调试、插件增强)
+- status: 查看数据库和索引状态 (DB直查，毫秒级响应，插件状态)
 - config: 查看/编辑/验证配置
 - index: 索引管理 (build/scan)
 - maintenance: 数据库运维 (vacuum/soft-delete清理)
@@ -14,38 +14,39 @@ python rag_cli.py index build --force
 python rag_cli.py maintenance --dry-run
 python rag_cli.py config --validate
 """
+
 import argparse
+
+# ✅ 在 rag_cli.py 顶部导入区添加以下 4 行
+import array
 import csv
-import fnmatch
 import json
 import os
 import sys
 import time
-from pathlib import Path
-from io import StringIO
-
-# ✅ 在 rag_cli.py 顶部导入区添加以下 4 行
-import array
-import json
 from concurrent.futures import ThreadPoolExecutor
-from chunker.markdown_splitter import MarkdownSplitter  # noqa: E402
+from io import StringIO
+from pathlib import Path
 
+from chunker.markdown_splitter import MarkdownSplitter
 
 # 确保项目根目录在 sys.path
 script_dir = Path(__file__).parent.resolve()
 sys.path.insert(0, str(script_dir))
 
-from config import load_config
-from embedder.embed_engine import EmbeddingEngine
-from retriever.hybrid_engine import HybridEngine
-from scanner.scan_engine import DEFAULT_SKIP_DIRS, Scanner
-from storage.database import DatabaseManager
-from utils.logger import setup_logger
-from utils.jieba_helper import load_jieba_user_dict
-
 # 导入底层模块供 CLI 调用
 import build_index as build_mod
 import vacuum as vac_mod
+from config import load_config
+from embedder.embed_engine import EmbeddingEngine
+
+# 插件支持
+from plugins.bootstrap import PluginLoader
+from retriever.hybrid_engine import HybridEngine
+from scanner.scan_engine import DEFAULT_SKIP_DIRS, Scanner
+from storage.database import DatabaseManager
+from utils.jieba_helper import load_jieba_user_dict
+from utils.logger import setup_logger
 
 logger = setup_logger(level="INFO")
 
@@ -85,7 +86,7 @@ def cmd_status(args):
                 total_db_files = 0
                 for row in vault_stats:
                     print(f"   ✅ {row['vault_name']}: {row['cnt']} 个已索引文件")
-                    total_db_files += row['cnt']
+                    total_db_files += row["cnt"]
                 if total_db_files == 0:
                     print("   ⚠️ 暂无已索引文件，请运行 `python rag_cli.py index build --force`")
                 else:
@@ -98,7 +99,7 @@ def cmd_status(args):
                     cache_size = cache_path.stat().st_size / 1024 / 1024
                     print(f"   状态: ✅ 已存在 ({cache_size:.2f} MB)")
                 else:
-                    print(f"   状态: ⏳ 未初始化 (首次检索时自动创建)")
+                    print("   状态: ⏳ 未初始化 (首次检索时自动创建)")
 
             finally:
                 db.close()
@@ -106,11 +107,24 @@ def cmd_status(args):
             print("❌ 数据库未初始化，请运行: `python rag_cli.py index build --force`")
 
         # 核心配置摘要 (便于快速排查参数)
-        print(f"\n⚙️ 核心配置摘要")
-        print(f"   🤖 模型: {cfg.embedding_model.name} (dim={cfg.embedding_model.dimensions}, batch={cfg.embedding_model.batch_size})")
+        print("\n⚙️ 核心配置摘要")
+        print(
+            f"   🤖 模型: {cfg.embedding_model.name} (dim={cfg.embedding_model.dimensions}, batch={cfg.embedding_model.batch_size})"
+        )
         print(f"   🔍 检索: alpha={cfg.retrieval.get('alpha', 0.7)}, beta={cfg.retrieval.get('beta', 0.3)}")
         print(f"   ✂️ 分块: max_tokens={cfg.chunking.max_tokens}, overlap={cfg.chunking.overlap}")
-        print(f"   🕒 衰减: {'✅ 启用' if cfg.confidence.date_decay.enabled else '❌ 禁用'} (半衰期={cfg.confidence.date_decay.half_life_days}天)")
+        print(
+            f"   🕒 衰减: {'✅ 启用' if cfg.confidence.date_decay.enabled else '❌ 禁用'} (半衰期={cfg.confidence.date_decay.half_life_days}天)"
+        )
+
+        # 插件状态
+        print("\n🔌 插件系统")
+        print(f"   状态: {'✅ 已启用' if cfg.plugins.enabled else '❌ 已禁用'}")
+        if cfg.plugins.enabled and cfg.plugins.plugins:
+            print("   已配置插件:")
+            for p in cfg.plugins.plugins:
+                status = "✅" if p.enabled else "⏸️"
+                print(f"      {status} {p.name} (priority={p.priority})")
 
         print("\n" + "=" * 50)
         return 0
@@ -120,8 +134,9 @@ def cmd_status(args):
 
 
 def cmd_search(args):
-    """执行混合检索 (v2.1: 支持导出/Verbose/安全事务)"""
+    """执行混合检索 (v2.2: 支持导出/Verbose/安全事务/插件增强)"""
     db = None
+    plugin_loader = None
     try:
         cfg = load_config()
         db_path = Path(cfg.db_path).resolve()
@@ -132,16 +147,21 @@ def cmd_search(args):
         # 局部权重覆盖 (不污染全局配置)
         alpha = cfg.retrieval.get("alpha", 0.7)
         beta = cfg.retrieval.get("beta", 0.3)
-        if args.alpha is not None: alpha = args.alpha
-        if args.beta is not None: beta = args.beta
-        if args.mode == "keyword": alpha, beta = 0.0, 1.0
-        elif args.mode == "semantic": alpha, beta = 1.0, 0.0
+        if args.alpha is not None:
+            alpha = args.alpha
+        if args.beta is not None:
+            beta = args.beta
+        if args.mode == "keyword":
+            alpha, beta = 0.0, 1.0
+        elif args.mode == "semantic":
+            alpha, beta = 1.0, 0.0
 
         vaults = args.vaults if args.vaults else [v.name for v in cfg.vaults if v.enabled]
         vault_filter = vaults if vaults else None
 
         if args.verbose:
-            logger.setLevel("DEBUG")
+            import logging
+            logging.getLogger().setLevel(logging.DEBUG)
 
         db = DatabaseManager(str(db_path), vec_dimension=cfg.embedding_model.dimensions)
         embed_engine = EmbeddingEngine(
@@ -152,42 +172,166 @@ def cmd_search(args):
         )
         retriever = HybridEngine(config=cfg, db=db, embed_engine=embed_engine)
 
+        # 初始化插件系统 (用于增强检索)
+        plugin_enabled = cfg.plugins.enabled  # 记录插件是否启用
+        if plugin_enabled:
+            try:
+                plugin_loader = PluginLoader(cfg, None)
+                plugin_loader.load_all()
+                for plugin in plugin_loader.get_all_plugins().values():
+                    if hasattr(plugin, "set_db_connection"):
+                        plugin.set_db_connection(db.conn)
+                    # 初始化插件组件
+                    if hasattr(plugin, "_initialize_sync") and not getattr(plugin, "_initialized", True):
+                        try:
+                            plugin._initialize_sync()
+                        except Exception as init_err:
+                            logger.warning(f"⚠️ 插件初始化失败: {init_err}")
+            except Exception as e:
+                logger.warning(f"⚠️ 插件加载失败: {e}")
+                plugin_loader = None
+                plugin_enabled = False
+
         start = time.time()
         results = retriever.search(
             query=args.query, limit=args.top_k, vault_filter=vault_filter, alpha=alpha, beta=beta
         )
+
+        # 插件增强检索（统一评分版）
+        # 不启动插件时：使用基础检索分数
+        # 启动插件时：保留基础分数，增加图谱分数作为增强
+        query_vec = embed_engine.embed([args.query])[0] if plugin_loader else None
+        if plugin_loader:
+            try:
+                enhanced_results = plugin_loader.invoke_hook(
+                    "on_search", query=args.query, results=[r.__dict__ for r in results], query_vec=query_vec
+                )
+                # 如果插件返回了增强结果，使用增强结果替换原始结果
+                if enhanced_results and isinstance(enhanced_results, list) and len(enhanced_results) > 0:
+                    # enhanced_results 是钩子返回值列表，取第一个（插件的返回）
+                    first_result = enhanced_results[0]
+                    if isinstance(first_result, list) and len(first_result) > 0:
+                        # 将插件增强结果转换为 RetrievalResult 兼容格式
+                        from retriever.hybrid_engine import RetrievalResult
+                        plugin_results = []
+                        for r in first_result:
+                            # 检查是否已经是 RetrievalResult
+                            if isinstance(r, RetrievalResult):
+                                plugin_results.append(r)
+                            elif isinstance(r, dict):
+                                # 从插件结果构建 RetrievalResult（统一评分，保留基础分数）
+                                plugin_results.append(RetrievalResult(
+                                    chunk_id=r.get("chunk_id", 0),
+                                    content=r.get("content", ""),
+                                    file_path=r.get("file_path", ""),
+                                    absolute_path=r.get("absolute_path", r.get("file_path", "")),
+                                    section=r.get("section", ""),
+                                    start_pos=r.get("start_pos", 0),
+                                    end_pos=r.get("end_pos", 0),
+                                    vault_name=r.get("vault_name", ""),
+                                    chunk_type=r.get("chunk_type", ""),
+                                    # 保留基础检索分数
+                                    semantic_score=r.get("semantic_score", r.get("vector_score", 0.0)),
+                                    keyword_score=r.get("keyword_score", 0.0),
+                                    confidence_score=r.get("confidence_score", 1.0),
+                                    final_score=r.get("final_score", r.get("score", 0.0)),
+                                    confidence_reason=r.get("confidence_reason", ""),
+                                    file_hash=r.get("file_hash", ""),
+                                    # 图谱增强分值（插件启用时才有）
+                                    graph_score=r.get("graph_score", 0.0),
+                                    preference_score=r.get("preference_score", 0.0),
+                                    hop_distance=r.get("hop_distance", 0),
+                                ))
+                        if plugin_results:
+                            results = plugin_results
+                            if args.verbose:
+                                logger.info(f"✅ 插件增强了 {len(results)} 条结果（统一评分 + 图谱分值）")
+            except Exception as e:
+                logger.warning(f"⚠️ 插件增强失败: {e}")
+
         elapsed = time.time() - start
 
         # 📦 导出支持
         if args.output == "json":
-            print(json.dumps(
-                [{"rank": i+1, **r.__dict__} for i, r in enumerate(results)],
-                indent=2, ensure_ascii=False, default=str
-            ))
+            # 构建统一的 JSON 输出格式
+            output_data = {
+                "query": args.query,
+                "total": len(results),
+                "plugin_enabled": plugin_enabled,
+                "elapsed_ms": round(elapsed * 1000, 2),
+                "results": []
+            }
+            for i, r in enumerate(results):
+                result_item = {
+                    "rank": i + 1,
+                    "file": r.file_path,
+                    "abs_path": r.absolute_path,
+                    "content": r.content[:500],
+                    "score": round(r.final_score, 4),
+                    "semantic_score": round(r.semantic_score, 4),
+                    "keyword_score": round(r.keyword_score, 4),
+                    "confidence": round(r.confidence_score, 4),
+                }
+                # 插件启用时，添加图谱增强字段
+                if plugin_enabled:
+                    result_item["graph_score"] = round(getattr(r, 'graph_score', 0.0), 4)
+                    result_item["preference_score"] = round(getattr(r, 'preference_score', 0.0), 4)
+                    result_item["hop_distance"] = getattr(r, 'hop_distance', 0)
+                output_data["results"].append(result_item)
+            print(json.dumps(output_data, indent=2, ensure_ascii=False))
         elif args.output == "csv":
             output = StringIO()
-            writer = csv.DictWriter(output, fieldnames=[
-                "rank", "file_path", "absolute_path", "section", "vault_name",
-                "chunk_type", "content", "final_score", "confidence_score", "confidence_reason"
-            ])
+            writer = csv.DictWriter(
+                output,
+                fieldnames=[
+                    "rank",
+                    "file_path",
+                    "absolute_path",
+                    "section",
+                    "vault_name",
+                    "chunk_type",
+                    "content",
+                    "final_score",
+                    "confidence_score",
+                    "confidence_reason",
+                ],
+            )
             writer.writeheader()
             for i, r in enumerate(results, 1):
-                writer.writerow({
-                    "rank": i, "file_path": r.file_path, "absolute_path": r.absolute_path,
-                    "section": r.section, "vault_name": r.vault_name, "chunk_type": r.chunk_type,
-                    "content": r.content[:200].replace("\n", " "), "final_score": r.final_score,
-                    "confidence_score": r.confidence_score, "confidence_reason": r.confidence_reason
-                })
+                writer.writerow(
+                    {
+                        "rank": i,
+                        "file_path": r.file_path,
+                        "absolute_path": r.absolute_path,
+                        "section": r.section,
+                        "vault_name": r.vault_name,
+                        "chunk_type": r.chunk_type,
+                        "content": r.content[:200].replace("\n", " "),
+                        "final_score": r.final_score,
+                        "confidence_score": r.confidence_score,
+                        "confidence_reason": r.confidence_reason,
+                    }
+                )
             print(output.getvalue())
         else:
             # 🖥️ 终端输出
-            print(f"\n📊 检索结果 ({len(results)} 条, 耗时 {elapsed:.2f}s):\n")
+            plugin_tag = " [插件增强]" if plugin_enabled else ""
+            print(f"\n📊 检索结果 ({len(results)} 条, 耗时 {elapsed:.2f}s){plugin_tag}:\n")
             if not results:
                 print("   未找到相关结果.")
                 return 0
             for i, r in enumerate(results, 1):
                 content_preview = r.content[:200] + "..." if len(r.content) > 200 else r.content
-                scores = f"最终={r.final_score:.3f} | 语义={r.semantic_score:.3f} | 关键词={r.keyword_score:.3f} | 置信度={r.confidence_score:.2f}"
+                # 基础分值（始终显示）
+                scores = f"最终={r.final_score:.3f} | 语义={r.semantic_score:.3f} | 关键词={r.keyword_score:.3f}"
+                # 插件启用时，显示图谱增强分值
+                if plugin_enabled:
+                    graph_score = getattr(r, 'graph_score', 0.0)
+                    hop_distance = getattr(r, 'hop_distance', 0)
+                    scores += f" | 图={graph_score:.3f}"
+                    if hop_distance > 0:
+                        scores += f" (跳数={hop_distance})"
+                scores += f" | 置信度={r.confidence_score:.2f}"
                 print(f"{i}. [{scores}]")
                 print(f"   来源:{r.absolute_path}")
                 print(f"   类型:{r.vault_name} / {r.chunk_type} | 章节:{r.section}")
@@ -197,6 +341,8 @@ def cmd_search(args):
         logger.error(f"❌ 检索失败: {e}", exc_info=True)
         return 1
     finally:
+        if plugin_loader:
+            plugin_loader.shutdown()
         if db:
             db.close()
 
@@ -219,9 +365,11 @@ def cmd_config(args):
         try:
             cfg = load_config(str(config_path))
             import json
+
             from pydantic import TypeAdapter
+
             adapter = TypeAdapter(type(cfg))
-            data = adapter.dump_python(cfg, mode='json')
+            data = adapter.dump_python(cfg, mode="json")
             print("\n📋 解析后的配置 (JSON):\n")
             print(json.dumps(data, indent=2, ensure_ascii=False))
         except Exception as e:
@@ -263,6 +411,7 @@ def cmd_config(args):
             return 1
         import shutil
         import subprocess
+
         editors = [os.environ.get("EDITOR"), os.environ.get("VISUAL"), "nano", "vim", "vi", "code", "gedit"]
         editor = next((e for e in editors if e and shutil.which(e)), None)
         if not editor:
@@ -273,10 +422,21 @@ def cmd_config(args):
         return 0
     return 0
 
+
 def cmd_index(args):
     """索引管理 (build / scan) - 修复计数器与空文件诊断"""
     cfg = load_config()
     load_jieba_user_dict(cfg)
+
+    # 初始化插件系统
+    plugin_loader = None
+    if cfg.plugins.enabled:
+        try:
+            plugin_loader = PluginLoader(cfg, None)
+            plugin_loader.load_all()
+        except Exception as e:
+            logger.warning(f"⚠️ 插件加载失败: {e}")
+            plugin_loader = None
 
     if args.action == "build":
         print("🔄 触发全量索引重建...")
@@ -288,11 +448,20 @@ def cmd_index(args):
             return e.code
         finally:
             sys.argv = old_argv
+            if plugin_loader:
+                plugin_loader.shutdown()
         return 0
 
     elif args.action == "scan":
         print("🔍 执行增量扫描与索引更新...")
         db = DatabaseManager(cfg.db_path, vec_dimension=cfg.embedding_model.dimensions)
+
+        # 为插件设置数据库连接
+        if plugin_loader:
+            for plugin in plugin_loader.get_all_plugins().values():
+                if hasattr(plugin, "set_db_connection"):
+                    plugin.set_db_connection(db.conn)
+
         try:
             global_skip = DEFAULT_SKIP_DIRS | frozenset(cfg.exclude.dirs)
             scanner = Scanner(db, skip_dirs=global_skip, global_patterns=cfg.exclude.patterns)
@@ -300,7 +469,9 @@ def cmd_index(args):
             vault_excludes = {}
             for v in cfg.vaults:
                 if v.enabled:
-                    vault_excludes[v.name] = (frozenset(v.exclude.dirs), v.exclude.patterns) if v.exclude else (frozenset(), [])
+                    vault_excludes[v.name] = (
+                        (frozenset(v.exclude.dirs), v.exclude.patterns) if v.exclude else (frozenset(), [])
+                    )
 
             # 1. 扫描与元数据同步
             report = scanner.scan_vaults(vault_configs, vault_excludes)
@@ -317,7 +488,7 @@ def cmd_index(args):
             placeholders = ",".join(["?"] * len(changed_paths))
             cursor = db.conn.execute(
                 f"SELECT id, absolute_path, file_path, mtime FROM files WHERE absolute_path IN ({placeholders})",
-                changed_paths
+                changed_paths,
             )
             files_to_index = [dict(row) for row in cursor.fetchall()]
             if not files_to_index:
@@ -325,17 +496,20 @@ def cmd_index(args):
                 return 0
 
             print(f"   📦 发现 {len(files_to_index)} 个变更文件，开始重建索引...")
-            
+
             splitter = MarkdownSplitter(cfg)
             embed_engine = EmbeddingEngine(
-                model_name=cfg.embedding_model.name, cache_dir=cfg.embedding_model.cache_dir,
-                batch_size=cfg.embedding_model.batch_size, unload_after_seconds=cfg.embedding_model.unload_after_seconds,
+                model_name=cfg.embedding_model.name,
+                cache_dir=cfg.embedding_model.cache_dir,
+                batch_size=cfg.embedding_model.batch_size,
+                unload_after_seconds=cfg.embedding_model.unload_after_seconds,
             )
             batch_size = cfg.embedding_model.batch_size
             pending = []
             processed = 0
             empty_files = 0
             failed_files = 0
+            file_chunks_collector: dict = {}  # 收集文件级别的 chunks（用于触发 on_file_indexed 钩子）
 
             def _split_file(f):
                 p = Path(f["absolute_path"])
@@ -356,25 +530,49 @@ def cmd_index(args):
                             failed_files += 1
                         empty_files += 1
                         continue
-                        
+
                     for c in chunks:
                         pending.append((fid, c, fp))
                     if len(pending) >= batch_size:
-                        processed += _commit_batch(pending, embed_engine, db)
+                        processed += _commit_batch(
+                            pending, embed_engine, db,
+                            plugin_loader=plugin_loader,
+                            file_chunks_collector=file_chunks_collector
+                        )
                         pending.clear()
 
             # ✅ 修复：尾批处理计数器累加
             if pending:
-                processed += _commit_batch(pending, embed_engine, db)
+                processed += _commit_batch(
+                    pending, embed_engine, db,
+                    plugin_loader=plugin_loader,
+                    file_chunks_collector=file_chunks_collector
+                )
                 pending.clear()
+
+            # 触发文件级别的 on_file_indexed 钩子（用于图谱构建等）
+            if plugin_loader and file_chunks_collector:
+                try:
+                    print(f"   🔧 触发插件 on_file_indexed 钩子处理 {len(file_chunks_collector)} 个文件...")
+                    for file_id, data in file_chunks_collector.items():
+                        plugin_loader.invoke_hook(
+                            "on_file_indexed",
+                            file_id=file_id,
+                            chunks=data['chunks'],
+                            filepath=data['file_path'],
+                        )
+                    print("   ✅ 插件钩子处理完成")
+                except Exception as e:
+                    logger.warning(f"⚠️ on_file_indexed 钩子执行失败: {e}")
 
             # 📊 智能结果反馈
             if processed == 0:
                 if empty_files == len(files_to_index):
-                    print(f"   ⚠️ 所有文件内容为空、仅含 Frontmatter 或全被过滤，未生成有效 Chunks。")
+                    print("   ⚠️ 所有文件内容为空、仅含 Frontmatter 或全被过滤，未生成有效 Chunks。")
                 else:
-                    print(f"   ℹ️ 文件已处理，但未生成新 Chunks（可能内容被排除规则过滤）。")
-                if failed_files: print(f"   ❌ {failed_files} 个文件分块异常，详见日志。")
+                    print("   ℹ️ 文件已处理，但未生成新 Chunks（可能内容被排除规则过滤）。")
+                if failed_files:
+                    print(f"   ❌ {failed_files} 个文件分块异常，详见日志。")
             else:
                 print(f"   ✅ 增量重建完成：共处理 {processed} 个 chunks ({empty_files} 个空文件已跳过)")
             return 0
@@ -382,15 +580,28 @@ def cmd_index(args):
             logger.error(f"❌ 扫描失败: {e}", exc_info=True)
             return 1
         finally:
+            if plugin_loader:
+                plugin_loader.shutdown()
             db.close()
     return 0
 
-def _commit_batch(pending, embed_engine, db):
-    """执行单批向量化与入库，返回成功处理的 chunks 数量"""
+
+def _commit_batch(pending, embed_engine, db, plugin_loader=None, file_chunks_collector=None):
+    """执行单批向量化与入库，返回成功处理的 chunks 数量
+
+    Args:
+        pending: 待处理的 (file_id, chunk, file_path) 元组列表
+        embed_engine: 向量化引擎
+        db: 数据库管理器
+        plugin_loader: 插件加载器（用于触发图谱生成钩子）
+        file_chunks_collector: 文件级别 chunks 收集器（用于触发 on_file_indexed 钩子）
+    """
+    import json
     from datetime import date, datetime
-    import json, array
-    if not pending: return 0
-    
+
+    if not pending:
+        return 0
+
     texts = [p[1].content for p in pending]
     try:
         embs = embed_engine.embed(texts)
@@ -398,20 +609,70 @@ def _commit_batch(pending, embed_engine, db):
         logger.error(f"❌ 批次向量化失败: {e}")
         return 0
 
+    inserted_chunk_ids = []  # 收集新插入的 chunk 信息（用于触发钩子）
+
     try:
         db.conn.execute("PRAGMA synchronous = OFF;")
         for (fid, chunk, fp), emb in zip(pending, embs):
-            meta_json = json.dumps(chunk.metadata or {}, default=lambda o: o.isoformat() if isinstance(o, (date,datetime)) else str(o))
-            conf_json = json.dumps(chunk.confidence_metadata or {}, default=lambda o: o.isoformat() if isinstance(o, (date,datetime)) else str(o))
+            meta_json = json.dumps(
+                chunk.metadata or {}, default=lambda o: o.isoformat() if isinstance(o, (date, datetime)) else str(o)
+            )
+            conf_json = json.dumps(
+                chunk.confidence_metadata or {},
+                default=lambda o: o.isoformat() if isinstance(o, (date, datetime)) else str(o),
+            )
             cur = db.conn.execute(
                 "INSERT INTO chunks (file_id, chunk_index, content, content_type, section_title, section_path, start_pos, end_pos, confidence_final_weight, metadata, confidence_json) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                (fid, 0, chunk.content, chunk.content_type.value, chunk.section_title, chunk.section_path, chunk.start_pos, chunk.end_pos, 1.0, meta_json, conf_json)
+                (
+                    fid,
+                    0,
+                    chunk.content,
+                    chunk.content_type.value,
+                    chunk.section_title,
+                    chunk.section_path,
+                    chunk.start_pos,
+                    chunk.end_pos,
+                    1.0,
+                    meta_json,
+                    conf_json,
+                ),
             )
             cid = cur.lastrowid
+            inserted_chunk_ids.append((cid, fid, chunk, fp))
+
+            # 收集文件级别的 chunks（用于触发 on_file_indexed 钩子）
+            if file_chunks_collector is not None:
+                if fid not in file_chunks_collector:
+                    file_chunks_collector[fid] = {'chunks': [], 'file_path': fp}
+                file_chunks_collector[fid]['chunks'].append({
+                    'id': cid,
+                    'content': chunk.content,
+                    'metadata': chunk.metadata,
+                })
+
             if db.vec_support:
-                db.conn.execute("INSERT INTO vectors (chunk_id, embedding) VALUES (?,?)", (cid, array.array("f", emb).tobytes()))
-            db.conn.execute("INSERT INTO fts5_index (rowid, content) VALUES (?,?)", (cid, build_mod.prepare_fts_content(chunk, fp)))
+                db.conn.execute(
+                    "INSERT INTO vectors (chunk_id, embedding) VALUES (?,?)", (cid, array.array("f", emb).tobytes())
+                )
+            db.conn.execute(
+                "INSERT INTO fts5_index (rowid, content) VALUES (?,?)", (cid, build_mod.prepare_fts_content(chunk, fp))
+            )
         db.conn.commit()
+
+        # 触发插件钩子: on_chunks_indexed（图谱生成）
+        if plugin_loader and inserted_chunk_ids:
+            try:
+                for chunk_id, file_id, chunk, f_path in inserted_chunk_ids:
+                    plugin_loader.invoke_hook(
+                        "on_chunks_indexed",
+                        chunk_id=chunk_id,
+                        file_id=file_id,
+                        content=chunk.content,
+                        metadata=chunk.metadata,
+                    )
+            except Exception as e:
+                logger.warning(f"⚠️ 插件钩子执行失败: {e}")
+
         return len(pending)
     except Exception as e:
         db.conn.rollback()
@@ -420,8 +681,9 @@ def _commit_batch(pending, embed_engine, db):
     finally:
         db.conn.execute("PRAGMA synchronous = NORMAL;")
 
+
 def cmd_maintenance(args):
-    """数据库运维 (vacuum / soft-delete 清理)"""
+    """数据库运维 (vacuum / soft-delete 清理，含图谱数据)"""
     cfg = load_config()
     db = DatabaseManager(cfg.db_path, vec_dimension=cfg.embedding_model.dimensions)
     try:
@@ -429,12 +691,35 @@ def cmd_maintenance(args):
         print(f"📊 当前软删除比例: files={stats['files_ratio']:.1f}%, chunks={stats['chunks_ratio']:.1f}%")
         print(f"   数据库大小: {stats['file_size_mb']:.2f} MB")
 
+        # 显示图谱关联数据统计
+        graph_total = (
+            stats.get('relations_to_delete', 0) +
+            stats.get('principles_to_delete', 0) +
+            stats.get('notes_to_delete', 0) +
+            stats.get('jobs_to_delete', 0)
+        )
+        if graph_total > 0:
+            print(f"📊 图谱关联数据: relations={stats.get('relations_to_delete', 0)}, "
+                  f"principles={stats.get('principles_to_delete', 0)}, "
+                  f"notes={stats.get('notes_to_delete', 0)}, "
+                  f"jobs={stats.get('jobs_to_delete', 0)}")
+
         if args.dry_run:
-            print(f"🔍 预计清理: {stats['chunks_deleted']} chunks + {stats['files_deleted']} files")
+            print(f"🔍 预计清理: {stats['chunks_deleted']} chunks + {stats['files_deleted']} files + {graph_total} 图谱记录")
             return 0
 
-        print("🧹 开始清理软删除记录...")
-        vac_mod.clean_deleted_records(db, dry_run=False)
+        print("🧹 开始清理软删除记录（含图谱数据）...")
+        clean_stats = vac_mod.clean_deleted_records(db, dry_run=False)
+        total_deleted = (
+            clean_stats['chunks_deleted'] +
+            clean_stats['files_deleted'] +
+            clean_stats.get('relations_deleted', 0) +
+            clean_stats.get('principles_deleted', 0) +
+            clean_stats.get('notes_deleted', 0) +
+            clean_stats.get('jobs_deleted', 0)
+        )
+        print(f"   共删除 {total_deleted} 条记录")
+
         if not args.clean_only:
             print("🗜️ 执行 VACUUM 空间回收...")
             vac_mod.execute_vacuum(db, dry_run=False)

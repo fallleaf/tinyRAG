@@ -148,3 +148,36 @@ retrieval:
 jieba_user_dict: "data/jieba_user_dict.txt"
 stream_batch_size: 128
 max_concurrent_files: 2
+
+# =====================
+# 插件配置 (v2.2+)
+# =====================
+plugins:
+  enabled: false                    # 是否启用插件系统
+  auto_discover: true              # 是否自动发现插件
+  plugins:                         # 插件列表
+    - name: tinyrag_memory_graph   # 图-向量混合记忆插件
+      enabled: true
+      priority: 100
+      config:                      # 插件专属配置
+        graph:
+          enabled: true
+          entity_types:
+            - person
+            - organization
+            - location
+            - concept
+            - event
+          relation_types:
+            - related_to
+            - part_of
+            - caused_by
+            - created_by
+        retrieval:
+          vector_weight: 0.6
+          graph_weight: 0.4
+          max_hops: 2
+        memify:
+          enabled: true
+          decay_rate: 0.1
+          vacuum_interval_hours: 24

@@ -2,6 +2,7 @@
 """storage/database.py - SQLite 核心数据库管理器 (v2.1)"""
 import os
 import sqlite3
+
 from utils.logger import logger
 
 _FALLBACK_SCHEMA = """
@@ -68,11 +69,14 @@ class DatabaseManager:
 
     def end_bulk_insert(self, commit: bool = True):
         try:
-            if commit: self.conn.commit()
-            else: self.conn.rollback()
+            if commit:
+                self.conn.commit()
+            else:
+                self.conn.rollback()
         except Exception as e:
             logger.error(f"事务提交失败: {e}")
-            if not commit: self.conn.rollback()
+            if not commit:
+                self.conn.rollback()
         self.conn.execute("PRAGMA synchronous = NORMAL")
         self.conn.execute("PRAGMA cache_size = -16000")
 
@@ -83,7 +87,8 @@ class DatabaseManager:
             if vault_name:
                 sql += " AND vault_name = ?"
                 params.append(vault_name)
-            if not include_deleted: sql += " AND is_deleted = 0"
+            if not include_deleted:
+                sql += " AND is_deleted = 0"
             row = self.conn.execute(sql, params).fetchone()
             return dict(row) if row else None
         except Exception as e:
@@ -100,7 +105,7 @@ class DatabaseManager:
             return row["id"] if row else -1
         except sqlite3.IntegrityError as e:
             if "file_hash" in str(e):
-                logger.warning(f"⚠️ 数据库 schema 版本过旧，请运行：python scripts/migrate_remove_file_hash_unique.py")
+                logger.warning("⚠️ 数据库 schema 版本过旧，请运行：python scripts/migrate_remove_file_hash_unique.py")
                 return -1
             raise
         except Exception as e:
@@ -108,7 +113,8 @@ class DatabaseManager:
             return -1
 
     def search_vectors(self, query_vector: list[float], limit: int = 10) -> list[tuple[int, float]]:
-        if not self.vec_support or not query_vector: return []
+        if not self.vec_support or not query_vector:
+            return []
         try:
             import array
             query_blob = array.array("f", query_vector).tobytes()
@@ -124,7 +130,8 @@ class DatabaseManager:
         return " OR ".join(escaped_terms)
 
     def search_fts(self, keywords: str, limit: int = 10) -> list[tuple[int, float]]:
-        if not keywords or not keywords.strip(): return []
+        if not keywords or not keywords.strip():
+            return []
         try:
             escaped_query = self.escape_fts5_query(keywords)
             cursor = self.conn.execute("SELECT rowid, rank FROM fts5_index WHERE fts5_index MATCH ? ORDER BY rank LIMIT ?", (escaped_query, limit))

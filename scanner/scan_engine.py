@@ -191,10 +191,12 @@ class Scanner:
             for root, dirs, files in os.walk(vault_path):
                 dirs[:] = sorted(d for d in dirs if d not in all_skip_dirs)
                 for fname in sorted(files):
-                    if not fname.endswith(".md"): continue
+                    if not fname.endswith(".md"):
+                        continue
                     abs_path = os.path.join(root, fname)
                     rel_path = os.path.relpath(abs_path, vault_path)
-                    if all_patterns and self._match_patterns(rel_path, all_patterns): continue
+                    if all_patterns and self._match_patterns(rel_path, all_patterns):
+                        continue
                     try:
                         stat = os.stat(abs_path)
                         disk_files[abs_path] = (vault_name, rel_path, int(stat.st_mtime), stat.st_size)

@@ -118,7 +118,7 @@ class MarkdownSplitter:
         # 使用配置化的字符/token 比例
         return int(chinese_chars / self.chinese_chars_per_token + other_chars / self.english_chars_per_token)
 
-    def _estimate_chars_for_tokens(self, tokens: int, sample_text: str = None) -> int:
+    def _estimate_chars_for_tokens(self, tokens: int, sample_text: str | None = None) -> int:
         """
         估算指定 token 数对应的字符数上限
         用于快速判断是否需要精确计算

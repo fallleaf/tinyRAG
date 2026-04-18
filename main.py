@@ -14,8 +14,8 @@ script_dir = Path(__file__).parent.resolve()
 sys.path.insert(0, str(script_dir))
 
 # 导入必须在 sys.path 修改之后
-from mcp_server.server import RagServer  # noqa: E402
-from utils.logger import logger  # noqa: E402
+from mcp_server.server import RagServer
+from utils.logger import logger
 
 
 async def main():

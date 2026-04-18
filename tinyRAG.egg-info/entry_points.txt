@@ -1,0 +1,4 @@
+[console_scripts]
+rag-build = build_index:main
+rag-cli = rag_cli:main
+rag-server = mcp_server.server:main

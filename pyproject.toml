@@ -4,15 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tinyRAG"
-version = "1.0.0"
-description = "本地知识库检索增强系统，支持混合检索（向量 + 关键词）"
+version = "2.1.0"
+description = "本地知识库检索增强系统，支持混合检索（向量 + 关键词）及图-向量混合记忆插件"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"
 authors = [
     {name = "fallleaf", email = "fallleaf.yx@gamil.com"}
 ]
-keywords = ["rag", "retrieval", "vector-search", "knowledge-base", "mcp"]
+keywords = ["rag", "retrieval", "vector-search", "knowledge-base", "mcp", "graph-rag", "memory"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -40,6 +40,11 @@ dev = [
     "pytest>=7.4.0",
     "pytest-asyncio>=0.21.0",
 ]
+# 图-向量混合记忆插件依赖 (可选)
+memory-graph = [
+    "spacy>=3.7.0",
+    # 中文模型需单独安装: python -m spacy download zh_core_web_sm
+]
 
 [project.scripts]
 rag-cli = "rag_cli:main"
@@ -53,7 +58,7 @@ Repository = "https://github.com/fallleaf/tinyRAG.git"
 Issues = "https://github.com/fallleaf/tinyRAG/issues"
 
 [tool.setuptools]
-packages = ["chunker", "embedder", "retriever", "scanner", "storage", "mcp_server", "utils"]
+packages = ["chunker", "embedder", "retriever", "scanner", "storage", "mcp_server", "utils", "plugins", "plugins.bootstrap", "plugins.tinyrag_memory_graph"]
 
 [tool.black]
 line-length = 120
@@ -68,7 +73,7 @@ select = ["E", "W", "F", "I", "UP", "SIM", "RUF"]
 ignore = ["RUF001", "RUF002", "RUF003", "E501", "F841"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["scanner", "storage", "retriever", "chunker", "embedder", "mcp_server", "utils", "config"]
+known-first-party = ["scanner", "storage", "retriever", "chunker", "embedder", "mcp_server", "utils", "config", "plugins"]
 combine-as-imports = true
 
 [tool.pytest.ini_options]
