@@ -57,33 +57,34 @@ def json_serialize(obj):
     raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
 
-def process_file_worker(file_item: dict, splitter: MarkdownSplitter) -> tuple[int, list[Any], str]:
+def process_file_worker(file_item: dict, splitter: MarkdownSplitter) -> tuple[int, list[Any], str, str]:
+    """处理单个文件，返回 (file_id, chunks, file_path, absolute_path)"""
     abs_path = Path(file_item["absolute_path"])
     try:
         content = abs_path.read_text(encoding="utf-8")
         mtime = file_item.get("mtime")
         chunks = splitter.split(content, mtime)
-        return file_item["id"], chunks, file_item["file_path"]
+        return file_item["id"], chunks, file_item["file_path"], file_item["absolute_path"]
     except Exception as e:
         logger.error(f"❌ 读取/分块失败：{abs_path} - {e}")
-        return file_item["id"], [], file_item["file_path"]
+        return file_item["id"], [], file_item["file_path"], file_item["absolute_path"]
 
 
 def process_and_commit_batch(
-    chunks: list[tuple[int, Any, str]],
+    chunks: list[tuple[int, Any, str, str]],  # 新增: (file_id, chunk, file_path, absolute_path)
     embedder: EmbeddingEngine,
     db: DatabaseManager,
     start_idx: int,
     commit: bool = True,
     plugin_loader: PluginLoader = None,
-    file_chunks_collector: dict | None = None,  # 新增：收集文件级别的 chunks
+    file_chunks_collector: dict = None,  # 新增：收集文件级别的 chunks
 ) -> int:
     if not chunks:
         return start_idx
     texts = [c[1].content for c in chunks]
     embeddings = embedder.embed(texts)
     inserted_chunk_ids = []  # 收集新插入的 chunk_id
-    for idx, ((file_id, chunk, f_path), emb) in enumerate(zip(chunks, embeddings, strict=False)):
+    for idx, ((file_id, chunk, f_path, abs_path), emb) in enumerate(zip(chunks, embeddings, strict=False)):
         chunk_idx = start_idx + idx
         metadata_json = json.dumps(chunk.metadata or {}, ensure_ascii=False, default=json_serialize)
         confidence_json = json.dumps(chunk.confidence_metadata or {}, ensure_ascii=False, default=json_serialize)
@@ -110,7 +111,11 @@ def process_and_commit_batch(
         # 收集文件级别的 chunks（用于触发 on_file_indexed 钩子）
         if file_chunks_collector is not None:
             if file_id not in file_chunks_collector:
-                file_chunks_collector[file_id] = {'chunks': [], 'file_path': f_path}
+                file_chunks_collector[file_id] = {
+                    'chunks': [],
+                    'file_path': f_path,
+                    'absolute_path': abs_path  # 新增绝对路径
+                }
             file_chunks_collector[file_id]['chunks'].append({
                 'id': new_chunk_id,
                 'content': chunk.content,
@@ -197,6 +202,16 @@ def main():
     files_to_index = []
     if args.force:
         logger.info("🔄 模式：强制重建所有索引")
+        
+        # 先触发插件钩子，让插件清理它们的数据
+        if plugin_loader:
+            try:
+                logger.info("🧹 通知插件清理数据...")
+                plugin_loader.invoke_hook("on_index_rebuild", force=True)
+            except Exception as e:
+                logger.warning(f"⚠️ 插件 on_index_rebuild 钩子执行失败: {e}")
+        
+        # 清理核心表数据
         db.conn.execute("DELETE FROM fts5_index")
         cursor = db.conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='vectors'")
         if cursor.fetchone():
@@ -267,7 +282,7 @@ def main():
         f"⚙️ 配置: batch={config.embedding_model.batch_size}, stream_batch={stream_batch_size}, workers={max_concurrent_files}"
     )
 
-    pending_chunks: list[tuple[int, Any, str]] = []
+    pending_chunks: list[tuple[int, Any, str, str]] = []  # (file_id, chunk, file_path, absolute_path)
     total_processed = 0
     global_chunk_idx = 0
     total_files_with_chunks = 0
@@ -283,9 +298,9 @@ def main():
 
     try:
         with ThreadPoolExecutor(max_workers=max_concurrent_files) as executor:
-            for f_id, chunks, f_path in executor.map(lambda f: process_file_worker(f, splitter), files_to_index):
+            for f_id, chunks, f_path, abs_path in executor.map(lambda f: process_file_worker(f, splitter), files_to_index):
                 for c in chunks:
-                    pending_chunks.append((f_id, c, f_path))
+                    pending_chunks.append((f_id, c, f_path, abs_path))
                 if chunks:
                     total_files_with_chunks += 1
                 if len(pending_chunks) >= stream_batch_size:
@@ -317,7 +332,7 @@ def main():
         pbar.close()
     elapsed = time.time() - start_time
 
-    # ✅ 结果校验：避免"处理了文件但实际无内容可索引"的歧义日志
+    # ✅ 结果校验：避免“处理了文件但实际无内容可索引”的歧义日志
     if total_processed == 0 and total_files_with_chunks == 0:
         logger.warning("⚠️ 已扫描指定文件，但内容为空或全部被排除规则过滤，未生成新索引。")
     else:
@@ -335,6 +350,7 @@ def main():
                     file_id=file_id,
                     chunks=data['chunks'],
                     filepath=data['file_path'],
+                    absolute_path=data.get('absolute_path', ''),  # 新增绝对路径
                 )
             logger.info("✅ 插件钩子处理完成")
         except Exception as e:

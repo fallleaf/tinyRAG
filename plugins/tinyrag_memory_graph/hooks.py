@@ -36,6 +36,8 @@ class HookContext:
         frontmatter: YAML Frontmatter 元数据
         chunks_content: Chunk 内容列表
         response: LLM 响应内容
+        base_alpha: 基础检索的语义权重
+        base_beta: 基础检索的关键词权重
     """
     # 检索相关
     query: str | None = None
@@ -61,6 +63,10 @@ class HookContext:
 
     # 扩展数据
     extra: dict = field(default_factory=dict)
+
+    # 基础检索权重参数（修复问题1：插件感知基础检索权重）
+    base_alpha: float | None = None
+    base_beta: float | None = None
 
     def get_result_chunk_ids(self) -> list[int]:
         """从结果中提取 chunk_id 列表"""

@@ -5,11 +5,11 @@ import sys
 from pathlib import Path
 
 
-def setup_logger(level: str = "INFO", log_file: str = "logs/tinyRAG.log"):
+def setup_logger(level: str = "INFO", log_file: str = "logs/tinyRAG.log", enable_stderr: bool = True):
     """
     配置 Loguru 日志：
     1. 移除默认处理器
-    2. 添加 stderr 处理器 (MCP 协议要求)
+    2. 可选 stderr 处理器 (MCP 模式下禁用，避免干扰 JSON 协议)
     3. 添加文件处理器 (详细调试)
 
     修复 L3: loguru.remove() 会清除所有已注册的 handler（包括其他模块的），
@@ -27,12 +27,14 @@ def setup_logger(level: str = "INFO", log_file: str = "logs/tinyRAG.log"):
     loguru_logger.remove()
 
     # 1. 输出到 stderr (标准错误，不影响 stdout 的 JSON)
-    loguru_logger.add(
-        sys.stderr,
-        level=level,
-        format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
-        colorize=True,
-    )
+    # MCP 模式下禁用 stderr 输出，避免干扰 MCP 协议的 JSON 解析
+    if enable_stderr:
+        loguru_logger.add(
+            sys.stderr,
+            level=level,
+            format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
+            colorize=True,
+        )
 
     # 2. 输出到文件 (详细记录)
     loguru_logger.add(

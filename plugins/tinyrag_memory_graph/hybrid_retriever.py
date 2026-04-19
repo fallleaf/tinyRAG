@@ -176,18 +176,21 @@ class HybridRetriever:
             # 支持字典和对象两种格式
             if isinstance(r, dict):
                 chunk_id = r.get("chunk_id") or r.get("id", 0)
-                semantic_score = r.get("semantic_score", 0.5)
+                # 修复：不使用默认值，正确获取语义分数
+                # 如果 semantic_score 不存在，使用 0.0 而非 0.5
+                semantic_score = r.get("semantic_score", 0.0)
                 keyword_score = r.get("keyword_score", 0.0)
                 confidence_score = r.get("confidence_score", 1.0)
-                final_score = r.get("final_score", r.get("score", 0.5))
+                final_score = r.get("final_score", r.get("score", 0.0))
                 content = r.get("content", "")
                 file_path = r.get("file_path", "")
             else:
                 chunk_id = getattr(r, "chunk_id", getattr(r, "id", 0))
-                semantic_score = getattr(r, "semantic_score", 0.5)
+                # 修复：不使用默认值，正确获取语义分数
+                semantic_score = getattr(r, "semantic_score", 0.0)
                 keyword_score = getattr(r, "keyword_score", 0.0)
                 confidence_score = getattr(r, "confidence_score", 1.0)
-                final_score = getattr(r, "final_score", 0.5)
+                final_score = getattr(r, "final_score", 0.0)
                 content = getattr(r, "content", "")
                 file_path = getattr(r, "file_path", "")
 
@@ -275,8 +278,8 @@ class HybridRetriever:
         return results
 
     def _merge_candidates(self, vector_results: list[dict],
-                          graph_results: list[dict]) -> dict[int, dict]:
-        """合并向量和图召回的候选集"""
+                         graph_results: list[dict]) -> dict[int, dict]:
+        """合并向量和图搜索结果"""
         candidates = {}
 
         # 向量结果
@@ -285,6 +288,11 @@ class HybridRetriever:
             candidates[cid] = {
                 "chunk_id": cid,
                 "vector_score": r["score"],
+                "semantic_score": r.get("semantic_score", r["score"]),
+                "keyword_score": r.get("keyword_score", 0.0),
+                "confidence_score": r.get("confidence_score", 1.0),
+                # 修复：优先获取 base_final_score（来自 _convert_base_results）
+                "base_final_score": r.get("base_final_score", r.get("final_score", r["score"])),
                 "graph_score": 0.0,
                 "hop": 0,
                 "path_weight": 0.0,
@@ -300,6 +308,11 @@ class HybridRetriever:
                 candidates[cid] = {
                     "chunk_id": cid,
                     "vector_score": 0.0,
+                    "semantic_score": r.get("semantic_score", 0.0),
+                    "keyword_score": r.get("keyword_score", 0.0),
+                    "confidence_score": r.get("confidence_score", 1.0),
+                    # 修复：保持与向量结果处理一致的获取逻辑
+                    "base_final_score": r.get("base_final_score", r.get("final_score", 0.0)),
                     "graph_score": 0.0,
                     "hop": r["hop"],
                     "path_weight": r["path_weight"],
@@ -341,11 +354,16 @@ class HybridRetriever:
         ranked = []
         for cid, cand in candidates.items():
             # 获取基础检索分数（优先使用保留的基础分数）
-            base_final_score = cand.get("base_final_score", cand.get("vector_score", 0.0))
-            semantic_score = cand.get("semantic_score", cand.get("vector_score", 0.0))
+            # 后备链：base_final_score -> final_score -> 0.0
+            # 修复：移除 vector_score 作为后备，确保语义分数正确
+            base_final_score = cand.get("base_final_score", 
+                            cand.get("final_score", 0.0))
+            # 修复：直接获取 semantic_score，不使用 vector_score 作为后备
+            # 这样确保 keyword 模式下语义分数正确显示为 0
+            semantic_score = cand.get("semantic_score", 0.0)
             keyword_score = cand.get("keyword_score", 0.0)
             confidence_score = cand.get("confidence_score", 1.0)
-            v_score = cand["vector_score"]
+            v_score = cand.get("vector_score", 0.0)
 
             # 图分数（路径权重，越近越好）
             g_score = graph_weights.get(cid, 0.0)
@@ -475,7 +493,9 @@ class HybridRetriever:
                 note_title=row[5] or "",
                 section=row[2] or "",
                 # 基础检索分数
-                semantic_score=ranked.get("semantic_score", ranked.get("vector_score", 0.0)),
+                # 修复：直接获取 semantic_score，不使用 vector_score 作为后备
+                # 这样确保 keyword 模式下语义分数正确显示为 0
+                semantic_score=ranked.get("semantic_score", 0.0),
                 keyword_score=ranked.get("keyword_score", 0.0),
                 confidence_score=ranked.get("confidence_score", 1.0),
                 base_final_score=ranked.get("base_final_score", ranked.get("final_score", 0.0)),

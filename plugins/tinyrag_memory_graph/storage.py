@@ -11,9 +11,24 @@ storage.py - 图谱存储层
 import sqlite3
 import time
 from pathlib import Path
+from typing import Optional
 
 from plugins.tinyrag_memory_graph.config import MemoryGraphConfig
 from plugins.tinyrag_memory_graph.models import ChunkMeta, Entity, GraphBuildJob, Note, Relation
+
+
+def _row_to_dict(row) -> dict:
+    """将 sqlite3.Row 或 tuple 转换为 dict"""
+    if row is None:
+        return {}
+    # 尝试 sqlite3.Row 接口
+    if hasattr(row, 'keys'):
+        return {key: row[key] for key in row.keys()}
+    # 如果是 tuple，无法转换（需要列名），返回空
+    if isinstance(row, tuple):
+        raise ValueError("Cannot convert tuple to dict without column names. Use conn.row_factory = sqlite3.Row")
+    # 尝试字典接口
+    return dict(row)
 
 
 class GraphStorage:
@@ -27,6 +42,9 @@ class GraphStorage:
         self.conn = db_conn
         self.config = config
         self._initialized = False
+        # 设置 row_factory 以便正确获取列名
+        self._original_row_factory = self.conn.row_factory
+        self.conn.row_factory = sqlite3.Row
 
     def initialize(self):
         """初始化 Schema（执行迁移）"""
@@ -36,14 +54,30 @@ class GraphStorage:
         # 1. 执行 Schema 迁移脚本
         schema_path = Path(__file__).parent / "schema_v0.3.4_plus_memory.sql"
         if schema_path.exists():
-            with open(schema_path, encoding="utf-8") as f:
-                self.conn.executescript(f.read())
+            try:
+                with open(schema_path, encoding="utf-8") as f:
+                    sql_script = f.read()
+                self.conn.executescript(sql_script)
+                print(f"[GraphStorage] ✅ Schema 脚本执行成功: {schema_path}")
+            except Exception as e:
+                print(f"[GraphStorage] ❌ Schema 脚本执行失败: {e}")
+                import traceback
+                traceback.print_exc()
+        else:
+            print(f"[GraphStorage] ⚠️ Schema 文件不存在: {schema_path}")
 
         # 2. 检查并添加 chunks 表扩展列
         self._ensure_chunk_columns()
 
         self.conn.commit()
         self._initialized = True
+        
+        # 验证表是否创建成功
+        cursor = self.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('notes', 'entities', 'relations', 'graph_build_jobs')"
+        )
+        tables = [row[0] for row in cursor.fetchall()]
+        print(f"[GraphStorage] 📊 已创建的图谱表: {tables}")
 
     def _ensure_chunk_columns(self):
         """确保 chunks 表有所需的扩展列"""
@@ -60,14 +94,24 @@ class GraphStorage:
             ("last_accessed", "INTEGER"),
         ]
 
+        added_any = False
         for col_name, col_def in columns_to_add:
             if col_name not in existing_columns:
                 try:
                     self.conn.execute(f"ALTER TABLE chunks ADD COLUMN {col_name} {col_def}")
+                    added_any = True
+                    print(f"[GraphStorage] ✅ 添加列: chunks.{col_name}")
                 except sqlite3.OperationalError as e:
-                    # 列可能已存在，忽略错误
+                    # 列可能已存在，静默忽略
                     if "duplicate column" not in str(e).lower():
-                        raise
+                        print(f"[GraphStorage] ⚠️ 添加列失败 {col_name}: {e}")
+                    # else: 列已存在，忽略
+                except Exception as e:
+                    if "duplicate column" not in str(e).lower():
+                        print(f"[GraphStorage] ⚠️ 添加列异常 {col_name}: {e}")
+
+        if added_any:
+            self.conn.commit()
 
     # ==================== Note 操作 ====================
 
@@ -89,19 +133,19 @@ class GraphStorage:
             print(f"[GraphStorage] upsert_note error: {e}")
             return False
 
-    def get_note(self, note_id: str) -> Note | None:
+    def get_note(self, note_id: str) -> Optional[Note]:
         """获取文档记录"""
         row = self.conn.execute(
             "SELECT * FROM notes WHERE note_id = ?", (note_id,)
         ).fetchone()
-        return Note.from_db_row(dict(row)) if row else None
+        return Note.from_db_row(_row_to_dict(row)) if row else None
 
-    def get_note_by_filepath(self, filepath: str) -> Note | None:
+    def get_note_by_filepath(self, filepath: str) -> Optional[Note]:
         """通过文件路径获取文档记录"""
         row = self.conn.execute(
             "SELECT * FROM notes WHERE filepath = ?", (filepath,)
         ).fetchone()
-        return Note.from_db_row(dict(row)) if row else None
+        return Note.from_db_row(_row_to_dict(row)) if row else None
 
     def delete_note(self, note_id: str) -> bool:
         """删除文档记录（级联删除关系）"""
@@ -142,22 +186,25 @@ class GraphStorage:
             )
             return True
         except Exception as e:
+            # 如果是数据库关闭导致的错误，静默返回
+            if "closed database" in str(e) or "Cannot operate" in str(e):
+                return False
             print(f"[GraphStorage] upsert_entity error: {e}")
             return False
 
-    def get_entity(self, entity_id: str) -> Entity | None:
+    def get_entity(self, entity_id: str) -> Optional[Entity]:
         """获取实体"""
         row = self.conn.execute(
             "SELECT * FROM entities WHERE id = ?", (entity_id,)
         ).fetchone()
-        return Entity.from_db_row(dict(row)) if row else None
+        return Entity.from_db_row(_row_to_dict(row)) if row else None
 
     def get_entities_by_name(self, name: str) -> list[Entity]:
         """通过名称查找实体"""
         rows = self.conn.execute(
             "SELECT * FROM entities WHERE canonical_name = ?", (name,)
         ).fetchall()
-        return [Entity.from_db_row(dict(r)) for r in rows]
+        return [Entity.from_db_row(_row_to_dict(r)) for r in rows]
 
     # ==================== Relation 操作 ====================
 
@@ -185,7 +232,7 @@ class GraphStorage:
             "SELECT * FROM relations WHERE src_chunk_id = ? AND weight >= ? ORDER BY weight DESC",
             (chunk_id, min_weight)
         ).fetchall()
-        return [Relation.from_db_row(dict(r)) for r in rows]
+        return [Relation.from_db_row(_row_to_dict(r)) for r in rows]
 
     def get_relations_to(self, chunk_id: int, min_weight: float = 0.0) -> list[Relation]:
         """获取指向某 Chunk 的关系"""
@@ -193,7 +240,7 @@ class GraphStorage:
             "SELECT * FROM relations WHERE tgt_chunk_id = ? AND weight >= ? ORDER BY weight DESC",
             (chunk_id, min_weight)
         ).fetchall()
-        return [Relation.from_db_row(dict(r)) for r in rows]
+        return [Relation.from_db_row(_row_to_dict(r)) for r in rows]
 
     def touch_relation(self, src_chunk_id: int, tgt_chunk_id: int, rel_type: str) -> bool:
         """更新关系访问时间和计数"""
@@ -301,21 +348,49 @@ class GraphStorage:
 
     def update_chunk_meta(self, chunk_meta: ChunkMeta) -> bool:
         """更新 Chunk 的扩展元数据"""
-        try:
-            self.conn.execute(
-                """UPDATE chunks SET
-                       note_id = ?,
-                       inherited_meta = ?,
-                       is_representative = ?
-                   WHERE id = ?""",
-                chunk_meta.to_db_update()
-            )
-            return True
-        except Exception as e:
-            print(f"[GraphStorage] update_chunk_meta error: {e}")
-            return False
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                self.conn.execute(
+                    """UPDATE chunks SET
+                           note_id = ?,
+                           inherited_meta = ?,
+                           is_representative = ?
+                       WHERE id = ?""",
+                    chunk_meta.to_db_update()
+                )
+                return True
+            except sqlite3.OperationalError as e:
+                error_msg = str(e).lower()
+                # 如果是列不存在的错误，尝试添加列后重试
+                if "no column" in error_msg or "table has no column" in error_msg:
+                    print(f"[GraphStorage] 检测到缺失列，尝试添加...")
+                    self._ensure_chunk_columns()
+                    continue
+                # 如果是数据库锁定，等待重试
+                elif "locked" in error_msg and attempt < max_retries - 1:
+                    import time as _time
+                    _time.sleep(0.1 * (attempt + 1))
+                    continue
+                else:
+                    if "closed database" not in error_msg and "cannot operate" not in error_msg:
+                        print(f"[GraphStorage] update_chunk_meta error: {e}")
+                    return False
+            except Exception as e:
+                # 静默处理数据库关闭错误
+                error_msg = str(e).lower()
+                if "closed database" in error_msg or "cannot operate" in error_msg:
+                    return False
+                # 重试其他错误
+                if attempt < max_retries - 1:
+                    import time as _time
+                    _time.sleep(0.1 * (attempt + 1))
+                    continue
+                print(f"[GraphStorage] update_chunk_meta error: {e}")
+                return False
+        return False
 
-    def get_representative_chunk(self, note_id: str) -> int | None:
+    def get_representative_chunk(self, note_id: str) -> Optional[int]:
         """获取文档的代表 Chunk ID"""
         row = self.conn.execute(
             "SELECT id FROM chunks WHERE note_id = ? AND is_representative = 1 LIMIT 1",
@@ -362,7 +437,7 @@ class GraphStorage:
             print(f"[GraphStorage] create_job error: {e}")
             return False
 
-    def get_pending_job(self) -> GraphBuildJob | None:
+    def get_pending_job(self) -> Optional[GraphBuildJob]:
         """获取一个待处理任务"""
         row = self.conn.execute(
             """SELECT * FROM graph_build_jobs
@@ -370,7 +445,18 @@ class GraphStorage:
                ORDER BY created_at ASC
                LIMIT 1"""
         ).fetchone()
-        return GraphBuildJob.from_db_row(dict(row)) if row else None
+        return GraphBuildJob.from_db_row(_row_to_dict(row)) if row else None
+
+    def get_job_by_note_id(self, note_id: str) -> Optional[GraphBuildJob]:
+        """通过 note_id 获取任务"""
+        row = self.conn.execute(
+            """SELECT * FROM graph_build_jobs
+               WHERE note_id = ?
+               ORDER BY created_at DESC
+               LIMIT 1""",
+            (note_id,)
+        ).fetchone()
+        return GraphBuildJob.from_db_row(_row_to_dict(row)) if row else None
 
     def update_job_status(self, job: GraphBuildJob) -> bool:
         """更新任务状态"""
@@ -385,8 +471,12 @@ class GraphStorage:
                    WHERE job_id = ?""",
                 (job.status, job.started_at, job.finished_at, job.error_msg, job.job_id)
             )
+            self.conn.commit()  # ✅ 修复：确保状态更新立即提交
             return True
         except Exception as e:
+            # 静默处理数据库关闭错误
+            if "closed database" in str(e) or "Cannot operate" in str(e):
+                return False
             print(f"[GraphStorage] update_job_status error: {e}")
             return False
 

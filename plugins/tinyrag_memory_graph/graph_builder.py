@@ -14,6 +14,7 @@ import sqlite3
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from typing import Optional
 
 from plugins.tinyrag_memory_graph.config import MemoryGraphConfig
 from plugins.tinyrag_memory_graph.extractor import DualLayerExtractor, WikilinkExtractor
@@ -48,9 +49,9 @@ class GraphBuildQueue:
         self.config = config
         self.queue_config = config.queue
 
-        self._executor: ThreadPoolExecutor | None = None
+        self._executor: Optional[ThreadPoolExecutor] = None
         self._running = False
-        self._loop: asyncio.AbstractEventLoop | None = None
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
 
         # 统计
         self._stats = {
@@ -60,10 +61,38 @@ class GraphBuildQueue:
             "total_relations": 0,
         }
 
+    def _extract_title_from_content(self, content: str) -> str:
+        """从文档内容提取标题（回退策略）"""
+        import re
+        # 尝试匹配第一个 # 标题
+        match = re.search(r'^#+\s+(.+?)(?:\s*\n|$)', content, re.MULTILINE)
+        if match:
+            return match.group(1).strip()
+        return ""
+
+    def _extract_frontmatter(self, content: str) -> dict:
+        """从文档内容提取 frontmatter"""
+        from plugins.tinyrag_memory_graph.extractor import FrontmatterParser
+        return FrontmatterParser.parse(content)
+
     def start(self):
         """启动后台处理"""
         if self._running:
             return
+
+        # ✅ 恢复机制：重置遗留的 running 状态任务为 pending
+        # 这些任务可能是上次程序异常退出时遗留的
+        try:
+            cursor = self.storage.conn.execute(
+                """UPDATE graph_build_jobs 
+                   SET status = 'pending', error_msg = 'Recovered from interrupted run'
+                   WHERE status = 'running'"""
+            )
+            if cursor.rowcount > 0:
+                self.storage.conn.commit()
+                print(f"[GraphBuildQueue] 🔄 已恢复 {cursor.rowcount} 个中断的任务")
+        except Exception as e:
+            print(f"[GraphBuildQueue] ⚠️ 恢复任务失败: {e}")
 
         self._executor = ThreadPoolExecutor(
             max_workers=self.queue_config.max_workers,
@@ -75,14 +104,26 @@ class GraphBuildQueue:
         """停止后台处理"""
         self._running = False
         if self._executor:
-            self._executor.shutdown(wait=True)  # 等待任务完成
-            self._executor = None
+            try:
+                # 先尝试正常关闭，等待任务完成
+                self._executor.shutdown(wait=True, cancel_futures=False)
+            except TypeError:
+                # Python < 3.9 不支持 cancel_futures 参数
+                self._executor.shutdown(wait=True)
+            except Exception as e:
+                print(f"[GraphBuildQueue] 停止时出错: {e}")
+            finally:
+                self._executor = None
 
-    def submit(self, task: BuildTask) -> str:
+    def submit(self, task: BuildTask, sync: bool = False) -> str:
         """
         提交建图任务（FR-1.1）
 
         将任务推入异步队列，立即返回。
+
+        Args:
+            task: 建图任务
+            sync: 是否同步执行（CLI 模式下应设为 True）
         """
         job = GraphBuildJob(
             job_id=str(uuid.uuid4()),
@@ -91,12 +132,17 @@ class GraphBuildQueue:
             status="pending",
         )
 
+        # 立即提取 title 和 frontmatter，不等待后台任务
+        title = self._extract_title_from_content(task.content)
+        frontmatter = self._extract_frontmatter(task.content)
+
         # 先创建 note 记录（因为 graph_build_jobs 有外键约束）
         from plugins.tinyrag_memory_graph.models import Note
         note = Note(
             note_id=task.note_id,
             filepath=task.filepath,
-            title="",  # 稍后更新
+            title=title or frontmatter.get("title", ""),
+            frontmatter_json=frontmatter if frontmatter else None,
         )
         self.storage.upsert_note(note)
         self.storage.conn.commit()
@@ -104,19 +150,39 @@ class GraphBuildQueue:
         # 写入任务表
         self.storage.create_job(job)
 
-        # 如果有 executor，提交后台处理
-        if self._executor and self._running:
-            self._executor.submit(self._process_task, task)
+        # 判断执行模式：sync 参数优先，否则检查 executor 状态
+        if sync or not (self._executor and self._running):
+            # 同步执行（CLI 模式或线程池未启动时）
+            print(f"[GraphBuildQueue] 同步执行任务: {task.note_id}")
+            self._process_task(task, is_sync=True)
+        else:
+            # 后台执行（服务器模式）
+            print(f"[GraphBuildQueue] 提交后台任务: {task.note_id}")
+            self._executor.submit(self._process_task, task, False)
 
         return job.job_id
 
-    def _process_task(self, task: BuildTask):
+    def _process_task(self, task: BuildTask, is_sync: bool = False):
         """后台处理任务"""
+        # 异步模式下检查运行状态
+        if not is_sync and not self._running:
+            return
+
         job = None
         try:
-            # 获取并锁定任务
-            job = self.storage.get_pending_job()
-            if not job or job.note_id != task.note_id:
+            # 通过 note_id 获取特定任务（而不是任意 pending 任务）
+            job = self.storage.get_job_by_note_id(task.note_id)
+            if not job:
+                print(f"[GraphBuildQueue] 未找到任务: {task.note_id}")
+                return
+
+            # 检查任务状态
+            if job.status != "pending":
+                print(f"[GraphBuildQueue] 任务状态不是 pending: {job.status}")
+                return
+
+            # 异步模式下再次检查运行状态
+            if not is_sync and not self._running:
                 return
 
             job.start()
@@ -124,6 +190,10 @@ class GraphBuildQueue:
 
             # 执行建图
             stats = self._build_graph(task)
+
+            # 异步模式下检查运行状态
+            if not is_sync and not self._running:
+                return
 
             # 标记完成
             job.complete()
@@ -135,9 +205,15 @@ class GraphBuildQueue:
             self._stats["total_relations"] += stats.get("relations", 0)
 
         except Exception as e:
+            # 如果是解释器关闭导致的错误，静默忽略
+            if "interpreter shutdown" in str(e) or "closed database" in str(e):
+                return
             if job:
-                job.fail(str(e))
-                self.storage.update_job_status(job)
+                try:
+                    job.fail(str(e))
+                    self.storage.update_job_status(job)
+                except Exception:
+                    pass  # 数据库可能已关闭
             self._stats["total_failed"] += 1
             print(f"[GraphBuildQueue] Task failed: {e}")
 
@@ -310,7 +386,8 @@ class GraphBuilder:
 
     def build_for_document(self, filepath: str, content: str,
                            chunk_ids: list[int],
-                           chunks_content: list[str]) -> str:
+                           chunks_content: list[str],
+                           sync: bool = False) -> str:
         """
         为文档构建图谱
 
@@ -319,6 +396,7 @@ class GraphBuilder:
             content: 完整文档内容
             chunk_ids: Chunk ID 列表
             chunks_content: Chunk 内容列表
+            sync: 是否同步执行（CLI 模式应设为 True）
 
         Returns:
             任务 ID
@@ -333,7 +411,7 @@ class GraphBuilder:
             chunks_content=chunks_content,
         )
 
-        return self.queue.submit(task)
+        return self.queue.submit(task, sync=sync)
 
     def build_batch(self, documents: list[dict]) -> list[str]:
         """
@@ -371,4 +449,4 @@ class GraphBuilder:
         return self.queue.get_stats()
 
 
-__all__ = ["BuildTask", "GraphBuildQueue", "GraphBuilder"]
+__all__ = ["GraphBuildQueue", "GraphBuilder", "BuildTask"]

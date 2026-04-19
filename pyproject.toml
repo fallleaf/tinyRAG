@@ -58,7 +58,7 @@ Repository = "https://github.com/fallleaf/tinyRAG.git"
 Issues = "https://github.com/fallleaf/tinyRAG/issues"
 
 [tool.setuptools]
-packages = ["chunker", "embedder", "retriever", "scanner", "storage", "mcp_server", "utils", "plugins", "plugins.bootstrap", "plugins.tinyrag_memory_graph"]
+packages = ["chunker", "embedder", "retriever", "scanner", "storage", "mcp_server", "utils", "plugins", "plugins.tinyrag_memory_graph"]
 
 [tool.black]
 line-length = 120

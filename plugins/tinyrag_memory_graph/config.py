@@ -164,8 +164,9 @@ class MemoryGraphConfig:
                 max_hops=retrieval_data.get("max_hops", 2),
                 min_edge_weight=retrieval_data.get("min_edge_weight", 0.4),
                 max_traverse_nodes=retrieval_data.get("max_traverse_nodes", 50),
-                alpha=retrieval_data.get("alpha", 1.0),   # 基础分数保留系数
-                beta=retrieval_data.get("beta", 0.15),    # 图谱增强权重
+            # 修复问题2：兼容 config.yaml 的 vector_weight/graph_weight 命名
+            alpha=retrieval_data.get("alpha", retrieval_data.get("vector_weight", 1.0)), # 基础分数保留系数
+            beta=retrieval_data.get("beta", retrieval_data.get("graph_weight", 0.15)), # 图谱增强权重
                 gamma=retrieval_data.get("gamma", 0.1),   # 偏好加成权重
                 max_context_tokens=retrieval_data.get("max_context_tokens", 3500),
             ),

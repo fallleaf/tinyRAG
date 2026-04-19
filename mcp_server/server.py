@@ -56,7 +56,7 @@ from storage.database import DatabaseManager
 # Logger & Config
 # =====================
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
-logger = setup_logger(level="INFO")
+logger = setup_logger(level="INFO", enable_stderr=False)  # MCP 模式禁用 stderr，避免干扰 JSON 协议
 _BUILD_INDEX_MODULE_KEY = "_tinyrag_build_index"
 
 def _load_build_index_main():
@@ -238,7 +238,9 @@ class SearchTool(BaseTool):
                     "on_search",
                     query=query,
                     results=[r.__dict__ for r in results],
-                    query_vec=query_vec
+                    query_vec=query_vec,
+                    base_alpha=alpha,  # 传递基础检索的 alpha 权重
+                    base_beta=beta,    # 传递基础检索的 beta 权重
                 )
 
                 if enhanced_results and isinstance(enhanced_results, list) and len(enhanced_results) > 0:
@@ -269,6 +271,8 @@ class SearchTool(BaseTool):
                                     graph_score=r.get("graph_score", 0.0),
                                     preference_score=r.get("preference_score", 0.0),
                                     hop_distance=r.get("hop_distance", 0),
+                                    # 基础检索分数
+                                    base_final_score=r.get("base_final_score", r.get("final_score", r.get("score", 0.0))),
                                 ))
                         if plugin_results:
                             results = plugin_results
@@ -293,6 +297,8 @@ class SearchTool(BaseTool):
                 result_item["graph_score"] = round(getattr(r, 'graph_score', 0.0), 4)
                 result_item["preference_score"] = round(getattr(r, 'preference_score', 0.0), 4)
                 result_item["hop_distance"] = getattr(r, 'hop_distance', 0)
+                # 添加基础检索分数便于调试和验证
+                result_item["base_final_score"] = round(getattr(r, 'base_final_score', r.final_score), 4)
             output_results.append(result_item)
 
         return {
@@ -306,18 +312,19 @@ class ScanTool(BaseTool):
     name, description = "scan_index", "Incrementally scan and update file index (tinyRAG)"
     schema: ClassVar[dict] = {"type": "object", "properties": {}}
 
-    def _process_file_worker(self, file_item: dict, splitter: MarkdownSplitter) -> tuple[int, list, str]:
+    def _process_file_worker(self, file_item: dict, splitter: MarkdownSplitter) -> tuple[int, list, str, str]:
+        """处理单个文件，返回 (file_id, chunks, file_path, absolute_path)"""
         abs_path = Path(file_item["absolute_path"])
         if not abs_path.exists():
             logger.warning(f"⚠️ 文件不存在，跳过：{abs_path}")
-            return file_item["id"], [], file_item["file_path"]
+            return file_item["id"], [], file_item["file_path"], file_item["absolute_path"]
         try:
             content = abs_path.read_text(encoding="utf-8")
             chunks = splitter.split(content, file_item.get("mtime"))
-            return file_item["id"], chunks, file_item["file_path"]
+            return file_item["id"], chunks, file_item["file_path"], file_item["absolute_path"]
         except Exception as e:
             logger.error(f"❌ 读取/分块失败：{abs_path} - {type(e).__name__}: {e}")
-            return file_item["id"], [], file_item["file_path"]
+            return file_item["id"], [], file_item["file_path"], file_item["absolute_path"]
 
     async def _index_changed_files(self, changed_paths: list[str]) -> None:
         if not changed_paths:
@@ -334,9 +341,9 @@ class ScanTool(BaseTool):
         all_pending_chunks = []
         with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
             results = executor.map(lambda f: self._process_file_worker(f, self.ctx.splitter), files_to_index)
-            for f_id, chunks, f_path in results:
+            for f_id, chunks, f_path, abs_path in results:
                 for c in chunks:
-                    all_pending_chunks.append((f_id, c, f_path))
+                    all_pending_chunks.append((f_id, c, f_path, abs_path))
         if not all_pending_chunks:
             return
 
@@ -356,7 +363,7 @@ class ScanTool(BaseTool):
 
             try:
                 self.ctx.db.conn.execute("PRAGMA synchronous = OFF;")
-                for idx, ((file_id, chunk, f_path), emb) in enumerate(zip(batch, embeddings, strict=False)):
+                for idx, ((file_id, chunk, f_path, abs_path), emb) in enumerate(zip(batch, embeddings, strict=False)):
                     global_idx = processed + idx
                     metadata_json = json.dumps(chunk.metadata or {}, ensure_ascii=False, default=_json_serialize)
                     confidence_json = json.dumps(chunk.confidence_metadata or {}, ensure_ascii=False, default=_json_serialize)
@@ -371,7 +378,7 @@ class ScanTool(BaseTool):
                     inserted_chunk_ids.append((new_chunk_id, file_id, chunk, f_path))
 
                     if file_id not in file_chunks_collector:
-                        file_chunks_collector[file_id] = {'chunks': [], 'file_path': f_path}
+                                        file_chunks_collector[file_id] = {'chunks': [], 'file_path': f_path, 'absolute_path': abs_path}
                     file_chunks_collector[file_id]['chunks'].append({
                         'id': new_chunk_id,
                         'content': chunk.content,
@@ -417,6 +424,7 @@ class ScanTool(BaseTool):
                         file_id=file_id,
                         chunks=data['chunks'],
                         filepath=data['file_path'],
+                        absolute_path=data.get('absolute_path', ''),  # 传递绝对路径
                     )
                 logger.info("✅ 插件钩子处理完成")
             except Exception as e:

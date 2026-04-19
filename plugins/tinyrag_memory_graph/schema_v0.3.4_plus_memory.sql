@@ -131,8 +131,14 @@ CREATE INDEX IF NOT EXISTS idx_principles_chunk ON principles(chunk_id);
 CREATE INDEX IF NOT EXISTS idx_principles_approved ON principles(is_approved);
 
 -- =====================================================
--- 8. 插件元数据
+-- 8. 插件元数据（确保 index_metadata 表存在）
 -- =====================================================
+CREATE TABLE IF NOT EXISTS index_metadata (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at INTEGER DEFAULT (strftime('%s', 'now'))
+);
+
 INSERT OR IGNORE INTO index_metadata (key, value) VALUES ('memory_graph_schema_version', '0.3.4');
 INSERT OR IGNORE INTO index_metadata (key, value) VALUES ('memory_graph_enabled', 'true');
 INSERT OR IGNORE INTO index_metadata (key, value) VALUES ('memory_graph_last_memify', '0');

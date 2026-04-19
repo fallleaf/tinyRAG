@@ -199,11 +199,19 @@ class NLPExtractor:
             doc = self._nlp(text[:5000])  # 限制长度防止超时
 
             for ent in doc.ents:
+                # 安全获取置信度，兼容不同 spaCy 版本
+                confidence = 0.8  # 默认置信度
+                try:
+                    if hasattr(ent, "_") and hasattr(ent._, "confidence"):
+                        confidence = getattr(ent._, "confidence", 0.8)
+                except (TypeError, AttributeError):
+                    pass
+
                 entity = Entity(
                     id=self._generate_entity_id(ent.text, ent.label_),
                     canonical_name=ent.text.strip(),
                     type=self._map_entity_type(ent.label_),
-                    confidence=min(1.0, ent._.get("confidence", 0.8)) if hasattr(ent, "_") else 0.8,
+                    confidence=min(1.0, confidence),
                     source="spacy"
                 )
                 entities.append(entity)
@@ -445,6 +453,24 @@ class DualLayerExtractor:
         self.rule_extractor = RuleExtractor(self.extraction_config)
         self.llm_extractor = LLMExtractor(self.extraction_config) if self.extraction_config.chunk_mode == "llm_fallback" else None
 
+    def _ensure_json_serializable(self, data: dict) -> dict:
+        """确保数据可 JSON 序列化"""
+        import datetime
+        result = {}
+        for k, v in data.items():
+            if isinstance(v, (datetime.date, datetime.datetime)):
+                result[k] = v.isoformat()
+            elif isinstance(v, dict):
+                result[k] = self._ensure_json_serializable(v)
+            elif isinstance(v, list):
+                result[k] = [
+                    item.isoformat() if isinstance(item, (datetime.date, datetime.datetime)) else item
+                    for item in v
+                ]
+            else:
+                result[k] = v
+        return result
+
     def extract_document_level(self, content: str, note_id: str) -> ExtractionResult:
         """
         文档级抽取（FR-1.2）
@@ -457,7 +483,9 @@ class DualLayerExtractor:
 
         # 1. 解析 Frontmatter
         frontmatter = FrontmatterParser.parse(content)
-        result.frontmatter = FrontmatterParser.extract_frontmatter_fields(frontmatter)
+        result.frontmatter = self._ensure_json_serializable(
+            FrontmatterParser.extract_frontmatter_fields(frontmatter)
+        )
 
         # 2. 提取 Wikilinks
         wikilinks = WikilinkExtractor.extract(content)
@@ -502,6 +530,7 @@ class DualLayerExtractor:
 
         使用 spacy + 规则词典，可选 LLM 后备。
         """
+        import sys
         start_time = time.time()
         result = ExtractionResult(source="chunk_level")
 
@@ -512,17 +541,28 @@ class DualLayerExtractor:
         # 2. NLP 抽取（如果启用）
         if self.nlp_extractor:
             try:
-                with ThreadPoolExecutor(max_workers=1) as executor:
-                    future = executor.submit(
-                        self.nlp_extractor.extract_entities, chunk_content
-                    )
-                    try:
-                        nlp_entities = future.result(
-                            timeout=self.extraction_config.chunk_timeout_ms / 1000
+                # 检查解释器是否正在关闭
+                if hasattr(sys, 'flags') and sys.flags is None:
+                    # 解释器正在关闭，跳过 NLP 抽取
+                    pass
+                else:
+                    with ThreadPoolExecutor(max_workers=1) as executor:
+                        future = executor.submit(
+                            self.nlp_extractor.extract_entities, chunk_content
                         )
-                        result.entities.extend(nlp_entities)
-                    except FuturesTimeoutError:
-                        pass
+                        try:
+                            nlp_entities = future.result(
+                                timeout=self.extraction_config.chunk_timeout_ms / 1000
+                            )
+                            result.entities.extend(nlp_entities)
+                        except FuturesTimeoutError:
+                            pass
+            except RuntimeError as e:
+                # 解释器关闭时的错误，静默忽略
+                if "interpreter shutdown" in str(e):
+                    pass
+                else:
+                    print(f"[DualLayerExtractor] NLP extraction error: {e}")
             except Exception as e:
                 print(f"[DualLayerExtractor] NLP extraction error: {e}")
 

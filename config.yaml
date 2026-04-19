@@ -86,8 +86,8 @@ embedding_model:
   cache_dir: "~/.cache/fastembed"
   size: "small"
   dimensions: 512
-  batch_size: 32
-  unload_after_seconds: 300
+  batch_size: 64
+  unload_after_seconds: 6000
 
 chunking:
   max_tokens: 512
@@ -147,7 +147,7 @@ retrieval:
   beta: 0.3
 jieba_user_dict: "data/jieba_user_dict.txt"
 stream_batch_size: 128
-max_concurrent_files: 2
+max_concurrent_files: 4
 
 # =====================
 # 插件配置 (v2.2+)

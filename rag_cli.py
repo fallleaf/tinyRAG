@@ -145,16 +145,22 @@ def cmd_search(args):
             return 1
 
         # 局部权重覆盖 (不污染全局配置)
+        # 修复：--mode 设置默认权重，用户指定的 --alpha/--beta 优先级最高
         alpha = cfg.retrieval.get("alpha", 0.7)
         beta = cfg.retrieval.get("beta", 0.3)
-        if args.alpha is not None:
-            alpha = args.alpha
-        if args.beta is not None:
-            beta = args.beta
+
+        # 根据模式设置默认权重
         if args.mode == "keyword":
             alpha, beta = 0.0, 1.0
         elif args.mode == "semantic":
             alpha, beta = 1.0, 0.0
+        # hybrid 模式使用配置文件的默认值（已在上面设置）
+
+        # 用户显式指定的参数优先级最高（覆盖 mode 的默认值）
+        if args.alpha is not None:
+            alpha = args.alpha
+        if args.beta is not None:
+            beta = args.beta
 
         vaults = args.vaults if args.vaults else [v.name for v in cfg.vaults if v.enabled]
         vault_filter = vaults if vaults else None
@@ -203,8 +209,14 @@ def cmd_search(args):
         query_vec = embed_engine.embed([args.query])[0] if plugin_loader else None
         if plugin_loader:
             try:
+                # 修复：传递基础检索的权重参数给插件，使图谱增强能够感知用户指定的权重
                 enhanced_results = plugin_loader.invoke_hook(
-                    "on_search", query=args.query, results=[r.__dict__ for r in results], query_vec=query_vec
+                    "on_search",
+                    query=args.query,
+                    results=[r.__dict__ for r in results],
+                    query_vec=query_vec,
+                    base_alpha=alpha,  # 传递基础检索的 alpha 权重
+                    base_beta=beta,    # 传递基础检索的 beta 权重
                 )
                 # 如果插件返回了增强结果，使用增强结果替换原始结果
                 if enhanced_results and isinstance(enhanced_results, list) and len(enhanced_results) > 0:
@@ -241,6 +253,8 @@ def cmd_search(args):
                                     graph_score=r.get("graph_score", 0.0),
                                     preference_score=r.get("preference_score", 0.0),
                                     hop_distance=r.get("hop_distance", 0),
+                                    # 基础检索分数（修复问题3）
+                                    base_final_score=r.get("base_final_score", r.get("final_score", 0.0)),
                                 ))
                         if plugin_results:
                             results = plugin_results
@@ -277,6 +291,8 @@ def cmd_search(args):
                     result_item["graph_score"] = round(getattr(r, 'graph_score', 0.0), 4)
                     result_item["preference_score"] = round(getattr(r, 'preference_score', 0.0), 4)
                     result_item["hop_distance"] = getattr(r, 'hop_distance', 0)
+                    # 修复问题3：添加 base_final_score 字段便于调试和验证
+                    result_item["base_final_score"] = round(getattr(r, 'base_final_score', r.final_score), 4)
                 output_data["results"].append(result_item)
             print(json.dumps(output_data, indent=2, ensure_ascii=False))
         elif args.output == "csv":
@@ -452,11 +468,14 @@ def cmd_index(args):
                 plugin_loader.shutdown()
         return 0
 
-    elif args.action == "scan":
+    # =========================
+    # 修改点 1：cmd_index 内 scan 分支
+    # =========================
+
+    if args.action == "scan":
         print("🔍 执行增量扫描与索引更新...")
         db = DatabaseManager(cfg.db_path, vec_dimension=cfg.embedding_model.dimensions)
 
-        # 为插件设置数据库连接
         if plugin_loader:
             for plugin in plugin_loader.get_all_plugins().values():
                 if hasattr(plugin, "set_db_connection"):
@@ -465,7 +484,9 @@ def cmd_index(args):
         try:
             global_skip = DEFAULT_SKIP_DIRS | frozenset(cfg.exclude.dirs)
             scanner = Scanner(db, skip_dirs=global_skip, global_patterns=cfg.exclude.patterns)
+
             vault_configs = [(v.name, v.path) for v in cfg.vaults if v.enabled]
+
             vault_excludes = {}
             for v in cfg.vaults:
                 if v.enabled:
@@ -473,7 +494,6 @@ def cmd_index(args):
                         (frozenset(v.exclude.dirs), v.exclude.patterns) if v.exclude else (frozenset(), [])
                     )
 
-            # 1. 扫描与元数据同步
             report = scanner.scan_vaults(vault_configs, vault_excludes)
             scanner.process_report(report)
 
@@ -484,13 +504,13 @@ def cmd_index(args):
                 print("   ℹ️ 扫描报告为空，无需更新。")
                 return 0
 
-            # 2. 查询待索引文件
             placeholders = ",".join(["?"] * len(changed_paths))
             cursor = db.conn.execute(
                 f"SELECT id, absolute_path, file_path, mtime FROM files WHERE absolute_path IN ({placeholders})",
                 changed_paths,
             )
             files_to_index = [dict(row) for row in cursor.fetchall()]
+
             if not files_to_index:
                 print("   ℹ️ 无待索引文件。")
                 return 0
@@ -498,59 +518,71 @@ def cmd_index(args):
             print(f"   📦 发现 {len(files_to_index)} 个变更文件，开始重建索引...")
 
             splitter = MarkdownSplitter(cfg)
+
             embed_engine = EmbeddingEngine(
                 model_name=cfg.embedding_model.name,
                 cache_dir=cfg.embedding_model.cache_dir,
                 batch_size=cfg.embedding_model.batch_size,
                 unload_after_seconds=cfg.embedding_model.unload_after_seconds,
             )
+
             batch_size = cfg.embedding_model.batch_size
             pending = []
             processed = 0
             empty_files = 0
             failed_files = 0
-            file_chunks_collector: dict = {}  # 收集文件级别的 chunks（用于触发 on_file_indexed 钩子）
+            file_chunks_collector: dict = {}
 
+            # ✅ 修复点：函数移到 with 外部
             def _split_file(f):
                 p = Path(f["absolute_path"])
                 if not p.exists():
-                    return f["id"], [], f["file_path"], "文件不存在"
+                    return f["id"], [], f["file_path"], f["absolute_path"], "文件不存在"
                 try:
                     content = p.read_text("utf-8")
                     chunks = splitter.split(content, f.get("mtime"))
-                    return f["id"], chunks, f["file_path"], "OK"
+                    return f["id"], chunks, f["file_path"], f["absolute_path"], "OK"
                 except Exception as e:
-                    return f["id"], [], f["file_path"], f"异常:{e}"
+                    return f["id"], [], f["file_path"], f["absolute_path"], f"异常:{e}"
 
+            # 并发处理
             with ThreadPoolExecutor(max_workers=cfg.max_concurrent_files) as ex:
-                for fid, chunks, fp, status in ex.map(_split_file, files_to_index):
+                for fid, chunks, fp, fabs, status in ex.map(_split_file, files_to_index):
+
                     if not chunks:
                         if status != "OK":
                             logger.warning(f"⚠️ 分块失败 {fp}: {status}")
                             failed_files += 1
-                        empty_files += 1
+                        else:
+                            empty_files += 1
                         continue
 
                     for c in chunks:
-                        pending.append((fid, c, fp))
+                        # ✅ 修复：传 fabs
+                        pending.append((fid, c, fp, fabs))
+
                     if len(pending) >= batch_size:
                         processed += _commit_batch(
-                            pending, embed_engine, db,
+                            pending,
+                            embed_engine,
+                            db,
                             plugin_loader=plugin_loader,
-                            file_chunks_collector=file_chunks_collector
+                            file_chunks_collector=file_chunks_collector,
                         )
                         pending.clear()
 
-            # ✅ 修复：尾批处理计数器累加
+            # 尾批
             if pending:
                 processed += _commit_batch(
-                    pending, embed_engine, db,
+                    pending,
+                    embed_engine,
+                    db,
                     plugin_loader=plugin_loader,
-                    file_chunks_collector=file_chunks_collector
+                    file_chunks_collector=file_chunks_collector,
                 )
                 pending.clear()
 
-            # 触发文件级别的 on_file_indexed 钩子（用于图谱构建等）
+            # 插件钩子
             if plugin_loader and file_chunks_collector:
                 try:
                     print(f"   🔧 触发插件 on_file_indexed 钩子处理 {len(file_chunks_collector)} 个文件...")
@@ -558,24 +590,24 @@ def cmd_index(args):
                         plugin_loader.invoke_hook(
                             "on_file_indexed",
                             file_id=file_id,
-                            chunks=data['chunks'],
-                            filepath=data['file_path'],
+                            chunks=data["chunks"],
+                            filepath=data["file_path"],
+                            absolute_path=data.get("absolute_path", ""),
                         )
                     print("   ✅ 插件钩子处理完成")
                 except Exception as e:
                     logger.warning(f"⚠️ on_file_indexed 钩子执行失败: {e}")
 
-            # 📊 智能结果反馈
             if processed == 0:
                 if empty_files == len(files_to_index):
-                    print("   ⚠️ 所有文件内容为空、仅含 Frontmatter 或全被过滤，未生成有效 Chunks。")
+                    print("   ⚠️ 所有文件为空或被过滤")
                 else:
-                    print("   ℹ️ 文件已处理，但未生成新 Chunks（可能内容被排除规则过滤）。")
-                if failed_files:
-                    print(f"   ❌ {failed_files} 个文件分块异常，详见日志。")
+                    print("   ℹ️ 未生成新 chunks")
             else:
-                print(f"   ✅ 增量重建完成：共处理 {processed} 个 chunks ({empty_files} 个空文件已跳过)")
+                print(f"   ✅ 增量重建完成：{processed} chunks")
+
             return 0
+
         except Exception as e:
             logger.error(f"❌ 扫描失败: {e}", exc_info=True)
             return 1
@@ -583,19 +615,13 @@ def cmd_index(args):
             if plugin_loader:
                 plugin_loader.shutdown()
             db.close()
-    return 0
 
+
+# =========================
+# 修改点 2：_commit_batch 修复 fabs
+# =========================
 
 def _commit_batch(pending, embed_engine, db, plugin_loader=None, file_chunks_collector=None):
-    """执行单批向量化与入库，返回成功处理的 chunks 数量
-
-    Args:
-        pending: 待处理的 (file_id, chunk, file_path) 元组列表
-        embed_engine: 向量化引擎
-        db: 数据库管理器
-        plugin_loader: 插件加载器（用于触发图谱生成钩子）
-        file_chunks_collector: 文件级别 chunks 收集器（用于触发 on_file_indexed 钩子）
-    """
     import json
     from datetime import date, datetime
 
@@ -603,26 +629,34 @@ def _commit_batch(pending, embed_engine, db, plugin_loader=None, file_chunks_col
         return 0
 
     texts = [p[1].content for p in pending]
+
     try:
         embs = embed_engine.embed(texts)
     except Exception as e:
         logger.error(f"❌ 批次向量化失败: {e}")
         return 0
 
-    inserted_chunk_ids = []  # 收集新插入的 chunk 信息（用于触发钩子）
+    inserted_chunk_ids = []
 
     try:
         db.conn.execute("PRAGMA synchronous = OFF;")
-        for (fid, chunk, fp), emb in zip(pending, embs):
+
+        # ✅ 修复：解包 fabs
+        for (fid, chunk, fp, fabs), emb in zip(pending, embs):
+
             meta_json = json.dumps(
-                chunk.metadata or {}, default=lambda o: o.isoformat() if isinstance(o, (date, datetime)) else str(o)
+                chunk.metadata or {},
+                default=lambda o: o.isoformat() if isinstance(o, (date, datetime)) else str(o)
             )
+
             conf_json = json.dumps(
                 chunk.confidence_metadata or {},
                 default=lambda o: o.isoformat() if isinstance(o, (date, datetime)) else str(o),
             )
+
             cur = db.conn.execute(
-                "INSERT INTO chunks (file_id, chunk_index, content, content_type, section_title, section_path, start_pos, end_pos, confidence_final_weight, metadata, confidence_json) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                """INSERT INTO chunks (file_id, chunk_index, content, content_type, section_title, section_path, start_pos, end_pos, confidence_final_weight, metadata, confidence_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     fid,
                     0,
@@ -637,13 +671,19 @@ def _commit_batch(pending, embed_engine, db, plugin_loader=None, file_chunks_col
                     conf_json,
                 ),
             )
+
             cid = cur.lastrowid
             inserted_chunk_ids.append((cid, fid, chunk, fp))
 
-            # 收集文件级别的 chunks（用于触发 on_file_indexed 钩子）
+            # ✅ 修复 fabs
             if file_chunks_collector is not None:
                 if fid not in file_chunks_collector:
-                    file_chunks_collector[fid] = {'chunks': [], 'file_path': fp}
+                    file_chunks_collector[fid] = {
+                        'chunks': [],
+                        'file_path': fp,
+                        'absolute_path': fabs
+                    }
+
                 file_chunks_collector[fid]['chunks'].append({
                     'id': cid,
                     'content': chunk.content,
@@ -652,32 +692,24 @@ def _commit_batch(pending, embed_engine, db, plugin_loader=None, file_chunks_col
 
             if db.vec_support:
                 db.conn.execute(
-                    "INSERT INTO vectors (chunk_id, embedding) VALUES (?,?)", (cid, array.array("f", emb).tobytes())
+                    "INSERT INTO vectors (chunk_id, embedding) VALUES (?,?)",
+                    (cid, array.array("f", emb).tobytes())
                 )
+
             db.conn.execute(
-                "INSERT INTO fts5_index (rowid, content) VALUES (?,?)", (cid, build_mod.prepare_fts_content(chunk, fp))
+                "INSERT INTO fts5_index (rowid, content) VALUES (?,?)",
+                (cid, build_mod.prepare_fts_content(chunk, fp))
             )
+
         db.conn.commit()
 
-        # 触发插件钩子: on_chunks_indexed（图谱生成）
-        if plugin_loader and inserted_chunk_ids:
-            try:
-                for chunk_id, file_id, chunk, f_path in inserted_chunk_ids:
-                    plugin_loader.invoke_hook(
-                        "on_chunks_indexed",
-                        chunk_id=chunk_id,
-                        file_id=file_id,
-                        content=chunk.content,
-                        metadata=chunk.metadata,
-                    )
-            except Exception as e:
-                logger.warning(f"⚠️ 插件钩子执行失败: {e}")
-
         return len(pending)
+
     except Exception as e:
         db.conn.rollback()
         logger.error(f"❌ 批次提交失败：{e}")
         return 0
+
     finally:
         db.conn.execute("PRAGMA synchronous = NORMAL;")
 
