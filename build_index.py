@@ -36,15 +36,23 @@ def prepare_fts_content(chunk, file_path: str) -> str:
     doc_type = metadata.get("doc_type") or ""
     filename = os.path.basename(file_path)
     section_title = chunk.section_title or ""
+    
+    # 预计算分词结果，避免重复调用
+    seg_filename = jieba_segment(filename)
+    seg_section = jieba_segment(section_title)
+    seg_path = jieba_segment(chunk.section_path or "")
+    seg_tags = jieba_segment(tag_str)
+    seg_type = jieba_segment(doc_type)
+    seg_content = jieba_segment(chunk.content)
+    
+    # 文件名和章节标题权重加倍（重复一次）
     parts = [
-        jieba_segment(filename),
-        jieba_segment(filename),
-        jieba_segment(chunk.section_path or ""),
-        jieba_segment(section_title),
-        jieba_segment(section_title),
-        jieba_segment(tag_str),
-        jieba_segment(doc_type),
-        jieba_segment(chunk.content),
+        seg_filename, seg_filename,  # 文件名权重 x2
+        seg_path,
+        seg_section, seg_section,    # 章节标题权重 x2
+        seg_tags,
+        seg_type,
+        seg_content,
     ]
     return " ".join(filter(None, parts)).strip()
 
@@ -246,6 +254,7 @@ def main():
             files_to_index = [dict(row) for row in cursor.fetchall()]
 
         # 🔧 精准自愈：仅在无变更时检查缺失 chunks，并过滤空文件
+        missing = []  # 初始化避免未定义错误
         if not files_to_index:
             cursor = db.conn.execute(
                 """

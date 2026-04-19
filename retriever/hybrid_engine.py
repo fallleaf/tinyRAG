@@ -302,7 +302,7 @@ class HybridEngine:
         placeholders = ",".join(["?"] * len(candidate_ids))
         query_sql = f"""
                     SELECT c.*, f.file_path, f.absolute_path, f.vault_name, f.file_hash,
-                    c.inherited_meta
+                    COALESCE(c.inherited_meta, '{{}}') AS inherited_meta
                     FROM chunks c
                     JOIN files f ON c.file_id = f.id
                     WHERE c.id IN ({placeholders}) AND c.is_deleted = 0
@@ -328,12 +328,12 @@ class HybridEngine:
             # 这让用户能清楚看到哪些检索模式实际贡献了分数
             display_v_score = raw_v_score if alpha > 0 else 0.0
             display_k_score = raw_k_score if beta > 0 else 0.0
-            # 提取标签
+            # 提取标签（安全处理 inherited_meta）
             tags = []
             try:
-                inherited = json.loads(row["inherited_meta"] or "{}") if row["inherited_meta"] else {}
+                inherited = json.loads(row["inherited_meta"] or "{}")
                 tags = inherited.get("tags", [])[:3]
-            except (json.JSONDecodeError, TypeError):
+            except (json.JSONDecodeError, TypeError, KeyError):
                 pass
             final_results.append(
                 RetrievalResult(

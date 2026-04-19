@@ -119,7 +119,15 @@ class AppContext:
                 retriever = HybridEngine(config=config, db=db, embed_engine=embed_engine)
                 splitter = MarkdownSplitter(config)
 
-                # P3: 初始化插件系统
+                # 先设置 self.db，再初始化插件系统（插件需要访问 db）
+                self.config = config
+                self.db = db
+                self.scanner = scanner
+                self.retriever = retriever
+                self.splitter = splitter
+                self.vault_excludes = vault_excludes
+
+                # P3: 初始化插件系统（在设置 self.db 之后）
                 plugin_loader = None
                 if config.plugins.enabled:
                     try:
@@ -128,12 +136,6 @@ class AppContext:
                     except Exception as e:
                         logger.warning(f"⚠️ 插件系统初始化失败: {e}")
 
-                self.config = config
-                self.db = db
-                self.scanner = scanner
-                self.retriever = retriever
-                self.splitter = splitter
-                self.vault_excludes = vault_excludes
                 self.plugin_loader = plugin_loader  # P3
                 self._initialized = True
                 logger.info("MCP components initialized successfully")

@@ -2,6 +2,7 @@
 -- 新增：支持 Frontmatter 元数据存储和检索
 -- 修改：FTS5 改为独立表模式，支持 jieba 分词索引
 -- 修改(B7)：file_hash 移除 UNIQUE 约束，允许跨 vault 同内容文件
+-- 修改(P2)：添加 inherited_meta 字段支持插件扩展
 PRAGMA encoding = "UTF-8";
 PRAGMA journal_mode = WAL;
 PRAGMA busy_timeout = 5000;
@@ -37,6 +38,7 @@ CREATE TABLE IF NOT EXISTS chunks (
     
     metadata TEXT,           -- 存放完整的 Frontmatter
     confidence_json TEXT,    -- 新增：专门存放用于计算权重的原始因子 (JSON 格式)
+    inherited_meta TEXT,     -- 插件扩展：继承的元数据 (如图谱节点信息)
     
     is_deleted INTEGER DEFAULT 0,
     created_at INTEGER DEFAULT (strftime('%s', 'now')),

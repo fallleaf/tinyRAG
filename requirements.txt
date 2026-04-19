@@ -8,6 +8,8 @@ pydantic>=2.0          # 数据契约校验与配置解析 (config.py, models.py
 PyYAML>=6.0.1          # YAML 配置文件读取 (config.yaml, markdown_splitter.py)
 loguru>=0.7.2          # 结构化日志系统 (全局日志替换 print/logging)
 tqdm>=4.66.2           # 索引构建进度条 (build_index.py)
+jieba>=0.42.1          # 中文分词 (FTS5 关键词检索必需)
+tiktoken>=0.5.0        # 精确 Token 计数 (分块优化)
 
 # --- AI 嵌入与向量检索 ---
 fastembed>=0.4.0       # 轻量级 ONNX 嵌入模型引擎 (model_factory.py)
@@ -17,6 +19,13 @@ sqlite-vec>=0.1.6      # SQLite 向量搜索扩展 (database.py, hybrid_engine.p
 
 # --- MCP 协议服务层 ---
 mcp>=1.0.0             # Model Context Protocol 官方 SDK (server.py)
+
+# --- 图谱插件依赖 (可选) ---
+spacy>=3.8.0           # NLP 实体抽取 (plugins/tinyrag_memory_graph)
+# 中文模型安装 (二选一):
+#   方式1: python -m spacy download zh_core_web_sm
+#   方式2: pip install https://github.com/explosion/spacy-models/releases/download/zh_core_web_sm-3.8.0/zh_core_web_sm-3.8.0-py3-none-any.whl
+# 注: spacy-pkuseg 不需要，插件代码未使用此包
 
 # --- 可选依赖 (按需取消注释) ---
 # aiosqlite>=0.20.0    # 若未来迁移至全异步 DB 操作
