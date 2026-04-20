@@ -168,8 +168,10 @@ def get_merged_exclude(vault: VaultConfig, global_exclude: ExcludeConfig) -> Exc
 
 
 if __name__ == "__main__":
+    from utils.logger import logger
+
     try:
         cfg = load_config()
-        print("✅ 配置加载成功")
+        logger.info("✅ 配置加载成功")
     except Exception as e:
-        print(e)
+        logger.info(e)

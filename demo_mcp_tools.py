@@ -3,6 +3,8 @@
 演示 MCP 工具调用 - 用户视角
 展示如何通过 tinyRAG 的 MCP 工具获取知识库检索和文档总结
 """
+
+from loguru import logger
 import json
 import sys
 from pathlib import Path
@@ -63,7 +65,9 @@ class MCPSimulator:
             alpha, beta = None, None
 
         vaults = [v.name for v in self.config.vaults if v.enabled]
-        results = self.retriever.search(query, limit=top_k, vault_filter=vaults if vaults else None, alpha=alpha, beta=beta)
+        results = self.retriever.search(
+            query, limit=top_k, vault_filter=vaults if vaults else None, alpha=alpha, beta=beta
+        )
 
         return {
             "query": query,
@@ -153,7 +157,9 @@ class MCPSimulator:
         # 构建上下文
         context_parts = []
         for r in results["results"]:
-            context_parts.append(f"【文档 {r['rank']}】{r['file']}\n章节: {r['section']}\n内容: {r['content']}\n相关度: {r['score']}")
+            context_parts.append(
+                f"【文档 {r['rank']}】{r['file']}\n章节: {r['section']}\n内容: {r['content']}\n相关度: {r['score']}"
+            )
 
         context = "\n\n".join(context_parts)
 
@@ -162,7 +168,7 @@ class MCPSimulator:
 ## 用户问题
 {query}
 
-## 知识库检索结果 ({results['total']} 条)
+## 知识库检索结果 ({results["total"]} 条)
 {context}
 
 ## 请回答
@@ -172,60 +178,60 @@ class MCPSimulator:
 
 
 def main():
-    print("=" * 60)
-    print("🚀 tinyRAG MCP 工具演示 - 用户视角")
-    print("=" * 60)
+    logger.info("=" * 60)
+    logger.info("🚀 tinyRAG MCP 工具演示 - 用户视角")
+    logger.info("=" * 60)
 
     sim = MCPSimulator()
 
     try:
         # 1. 获取知识库统计
-        print("\n📌 [Tool: stats] 获取知识库统计")
-        print("-" * 40)
+        logger.info("\n📌 [Tool: stats] 获取知识库统计")
+        logger.info("-" * 40)
         stats = sim.tool_stats()
-        print(f"  📁 文件总数: {stats['files']['total']}")
-        print(f"  📝 分块总数: {stats['chunks']['total']}")
-        print(f"  🔢 向量总数: {stats['vectors']['total']}")
-        print(f"  🤖 嵌入模型: {stats['model']['name']}")
+        logger.info(f"  📁 文件总数: {stats['files']['total']}")
+        logger.info(f"  📝 分块总数: {stats['chunks']['total']}")
+        logger.info(f"  🔢 向量总数: {stats['vectors']['total']}")
+        logger.info(f"  🤖 嵌入模型: {stats['model']['name']}")
 
         # 2. 搜索演示
-        print("\n📌 [Tool: search] 混合检索演示")
-        print("-" * 40)
+        logger.info("\n📌 [Tool: search] 混合检索演示")
+        logger.info("-" * 40)
         query = "人工智能"
         search_result = sim.tool_search(query, top_k=3)
-        print(f"  查询: '{query}'")
-        print(f"  结果数: {search_result['total']}")
+        logger.info(f"  查询: '{query}'")
+        logger.info(f"  结果数: {search_result['total']}")
         for r in search_result["results"]:
-            print(f"  [{r['rank']}] {r['file']} (分数: {r['score']})")
+            logger.info(f"  [{r['rank']}] {r['file']} (分数: {r['score']})")
 
         # 3. 文档摘要提示词
-        print("\n📌 [Prompt: summarize_document] 文档摘要")
-        print("-" * 40)
+        logger.info("\n📌 [Prompt: summarize_document] 文档摘要")
+        logger.info("-" * 40)
         doc_path = "RAG检索增强生成技术.md"
         prompt = sim.prompt_summarize_document(doc_path)
-        print(f"  文档: {doc_path}")
-        print("\n生成的提示词 (可直接发送给 LLM):")
-        print("  " + "-" * 36)
+        logger.info(f"  文档: {doc_path}")
+        logger.info("\n生成的提示词 (可直接发送给 LLM):")
+        logger.info("  " + "-" * 36)
         # 只显示提示词的前 800 字符
         preview = prompt[:800] + "...\n[内容已截断，完整提示词可发给 LLM]" if len(prompt) > 800 else prompt
         for line in preview.split("\n"):
-            print(f"  {line}")
+            logger.info(f"  {line}")
 
         # 4. 检索增强回答提示词
-        print("\n📌 [Prompt: search_with_context] 检索增强回答")
-        print("-" * 40)
+        logger.info("\n📌 [Prompt: search_with_context] 检索增强回答")
+        logger.info("-" * 40)
         query = "什么是RAG技术"
         prompt2 = sim.prompt_search_with_context(query, top_k=3)
-        print(f"  问题: '{query}'")
-        print("\n生成的提示词 (可直接发送给 LLM):")
-        print("  " + "-" * 36)
+        logger.info(f"  问题: '{query}'")
+        logger.info("\n生成的提示词 (可直接发送给 LLM):")
+        logger.info("  " + "-" * 36)
         preview2 = prompt2[:800] + "...\n[内容已截断]" if len(prompt2) > 800 else prompt2
         for line in preview2.split("\n"):
-            print(f"  {line}")
+            logger.info(f"  {line}")
 
-        print("\n" + "=" * 60)
-        print("✅ MCP 工具演示完成")
-        print("=" * 60)
+        logger.info("\n" + "=" * 60)
+        logger.info("✅ MCP 工具演示完成")
+        logger.info("=" * 60)
 
     finally:
         sim.close()

@@ -4,6 +4,7 @@ models.py - 数据模型定义
 
 定义 Memory Graph 插件所需的数据表结构和 ORM 模型。
 """
+
 import json
 import time
 from dataclasses import dataclass, field
@@ -36,9 +37,10 @@ class Note:
 
     对应 notes 表，存储文档的 Frontmatter 和基本信息。
     """
-    note_id: str                      # 文档唯一标识 (filepath hash)
-    filepath: str                     # 文件路径
-    title: str = ""                   # 文档标题
+
+    note_id: str  # 文档唯一标识 (filepath hash)
+    filepath: str  # 文件路径
+    title: str = ""  # 文档标题
     frontmatter_json: dict = field(default_factory=dict)  # Frontmatter 元数据
     created_at: int = field(default_factory=lambda: int(time.time()))
 
@@ -97,11 +99,12 @@ class Entity:
 
     对应 entities 表，存储从文档中抽取的实体。
     """
-    id: str                           # 实体唯一标识
-    canonical_name: str               # 规范化名称
-    type: str = "UNKNOWN"             # 实体类型 (PERSON, ORG, LOC, MISC, CONCEPT)
-    confidence: float = 1.0           # 置信度
-    source: str = "nlp"               # 来源 (nlp / llm / rule)
+
+    id: str  # 实体唯一标识
+    canonical_name: str  # 规范化名称
+    type: str = "UNKNOWN"  # 实体类型 (PERSON, ORG, LOC, MISC, CONCEPT)
+    confidence: float = 1.0  # 置信度
+    source: str = "nlp"  # 来源 (nlp / llm / rule)
 
     def to_db_row(self) -> tuple:
         """转换为数据库行"""
@@ -132,14 +135,15 @@ class Relation:
 
     对应 relations 表，存储实体间的关系边。
     """
-    src_chunk_id: int                 # 源 Chunk ID
-    tgt_chunk_id: int                 # 目标 Chunk ID
-    rel_type: str                     # 关系类型 (LINKS_TO, MENTIONS, RELATED_TO, etc.)
-    scope: str = "chunk"              # 作用域 (doc / chunk)
-    weight: float = 0.8               # 关系权重
+
+    src_chunk_id: int  # 源 Chunk ID
+    tgt_chunk_id: int  # 目标 Chunk ID
+    rel_type: str  # 关系类型 (LINKS_TO, MENTIONS, RELATED_TO, etc.)
+    scope: str = "chunk"  # 作用域 (doc / chunk)
+    weight: float = 0.8  # 关系权重
     evidence_chunk_id: Optional[int] = None  # 证据 Chunk ID
-    last_hit: Optional[int] = None    # 最后访问时间戳
-    access_count: int = 0             # 访问次数
+    last_hit: Optional[int] = None  # 最后访问时间戳
+    access_count: int = 0  # 访问次数
 
     def to_db_row(self) -> tuple:
         """转换为数据库行（用于 INSERT）"""
@@ -188,10 +192,11 @@ class GraphBuildJob:
 
     对应 graph_build_jobs 表，追踪建图任务状态。
     """
-    job_id: str                       # 任务唯一标识
-    note_id: str                      # 文档 ID
+
+    job_id: str  # 任务唯一标识
+    note_id: str  # 文档 ID
     chunk_ids: list[int] = field(default_factory=list)  # Chunk ID 列表
-    status: str = "pending"           # pending / processing / done / failed
+    status: str = "pending"  # pending / processing / done / failed
     created_at: int = field(default_factory=lambda: int(time.time()))
     started_at: Optional[int] = None
     finished_at: Optional[int] = None
@@ -249,6 +254,7 @@ class ChunkMeta:
 
     用于扩展 chunks 表的字段（通过 ALTER TABLE 添加）。
     """
+
     chunk_id: int
     note_id: Optional[str] = None
     inherited_meta: dict = field(default_factory=dict)
@@ -269,29 +275,31 @@ class ChunkMeta:
 # 关系类型常量
 class RelationType:
     """预定义关系类型"""
-    LINKS_TO = "LINKS_TO"          # [[Wikilink]] 链接
-    MENTIONS = "MENTIONS"          # 实体提及
-    RELATED_TO = "RELATED_TO"      # 相关关系
-    SAME_AS = "SAME_AS"            # 同义关系
-    PART_OF = "PART_OF"            # 部分关系
+
+    LINKS_TO = "LINKS_TO"  # [[Wikilink]] 链接
+    MENTIONS = "MENTIONS"  # 实体提及
+    RELATED_TO = "RELATED_TO"  # 相关关系
+    SAME_AS = "SAME_AS"  # 同义关系
+    PART_OF = "PART_OF"  # 部分关系
     DERIVED_FROM = "DERIVED_FROM"  # 派生关系
-    TAGGED_WITH = "TAGGED_WITH"    # 标签关联
-    AUTHORED_BY = "AUTHORED_BY"    # 作者关联
-    BELONGS_TO = "BELONGS_TO"      # 归属关系
+    TAGGED_WITH = "TAGGED_WITH"  # 标签关联
+    AUTHORED_BY = "AUTHORED_BY"  # 作者关联
+    BELONGS_TO = "BELONGS_TO"  # 归属关系
 
 
 # 实体类型常量
 class EntityType:
     """预定义实体类型"""
-    PERSON = "PERSON"              # 人物
-    ORG = "ORG"                    # 组织
-    LOC = "LOC"                    # 地点
-    MISC = "MISC"                  # 杂项
-    CONCEPT = "CONCEPT"            # 概念
-    PROJECT = "PROJECT"            # 项目
-    TECHNOLOGY = "TECHNOLOGY"      # 技术
-    DATE = "DATE"                  # 日期
-    EVENT = "EVENT"                # 事件
+
+    PERSON = "PERSON"  # 人物
+    ORG = "ORG"  # 组织
+    LOC = "LOC"  # 地点
+    MISC = "MISC"  # 杂项
+    CONCEPT = "CONCEPT"  # 概念
+    PROJECT = "PROJECT"  # 项目
+    TECHNOLOGY = "TECHNOLOGY"  # 技术
+    DATE = "DATE"  # 日期
+    EVENT = "EVENT"  # 事件
 
 
 __all__ = [

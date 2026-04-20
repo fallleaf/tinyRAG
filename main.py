@@ -65,5 +65,5 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("\n👋 用户中断，退出程序")
+        logger.info("\n👋 用户中断，退出程序")
         sys.exit(0)

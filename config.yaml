@@ -153,7 +153,7 @@ max_concurrent_files: 2
 # 插件配置 (v2.2+)
 # =====================
 plugins:
-  enabled: false                    # 是否启用插件系统
+  enabled: true                    # 是否启用插件系统
   auto_discover: true              # 是否自动发现插件
   plugins:                         # 插件列表
     - name: tinyrag_memory_graph   # 图-向量混合记忆插件
@@ -177,6 +177,7 @@ plugins:
           vector_weight: 0.6
           graph_weight: 0.4
           max_hops: 2
+          doc_expand_top_k: 3      # 文档扩展召回数
         memify:
           enabled: true
           decay_rate: 0.1

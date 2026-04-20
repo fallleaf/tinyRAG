@@ -8,11 +8,14 @@ memify.py - 记忆代谢模块
 - 原则提炼
 - 异步调度
 """
+
 import asyncio
 import contextlib
 import sqlite3
 import time
 from dataclasses import dataclass
+
+from loguru import logger
 
 from plugins.tinyrag_memory_graph.config import MemoryGraphConfig
 from plugins.tinyrag_memory_graph.storage import GraphStorage
@@ -21,6 +24,7 @@ from plugins.tinyrag_memory_graph.storage import GraphStorage
 @dataclass
 class MemifyStats:
     """代谢统计"""
+
     relations_decayed: int = 0
     relations_marked_stale: int = 0
     relations_boosted: int = 0
@@ -73,7 +77,7 @@ class MemifyEngine:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                print(f"[MemifyEngine] Error in run loop: {e}")
+                logger.info(f"[MemifyEngine] Error in run loop: {e}")
                 await asyncio.sleep(60)  # 错误后等待
 
     async def run_memify(self) -> MemifyStats:
@@ -108,7 +112,7 @@ class MemifyEngine:
             self._update_metadata()
 
         except Exception as e:
-            print(f"[MemifyEngine] Memify error: {e}")
+            logger.info(f"[MemifyEngine] Memify error: {e}")
             self.db.rollback()
 
         stats.processing_time_ms = (time.time() - start_time) * 1000
@@ -142,7 +146,7 @@ class MemifyEngine:
                    WHERE access_count < ?
                      AND created_at < ?
                      AND weight < 0.3""",
-                (self.memify_config.stale_access_threshold, cutoff_time)
+                (self.memify_config.stale_access_threshold, cutoff_time),
             )
 
             stale_relations = cursor.fetchall()
@@ -152,13 +156,13 @@ class MemifyEngine:
                 self.db.execute(
                     """UPDATE relations SET weight = 0.1
                        WHERE src_chunk_id = ? AND tgt_chunk_id = ? AND rel_type = ?""",
-                    (rel[0], rel[1], rel[2])
+                    (rel[0], rel[1], rel[2]),
                 )
 
             return len(stale_relations)
 
         except Exception as e:
-            print(f"[MemifyEngine] Mark stale error: {e}")
+            logger.info(f"[MemifyEngine] Mark stale error: {e}")
             return 0
 
     async def _boost_recent_paths(self) -> int:
@@ -175,14 +179,16 @@ class MemifyEngine:
                 """SELECT src_chunk_id, tgt_chunk_id, rel_type
                    FROM relations
                    WHERE last_hit > ?""",
-                (recent_threshold,)
+                (recent_threshold,),
             )
 
             recent_relations = cursor.fetchall()
 
             for rel in recent_relations:
                 self.storage.boost_relation(
-                    rel[0], rel[1], rel[2],
+                    rel[0],
+                    rel[1],
+                    rel[2],
                     amount=self.memify_config.path_boost,
                     max_weight=1.0,
                 )
@@ -190,7 +196,7 @@ class MemifyEngine:
             return len(recent_relations)
 
         except Exception as e:
-            print(f"[MemifyEngine] Boost paths error: {e}")
+            logger.info(f"[MemifyEngine] Boost paths error: {e}")
             return 0
 
     async def _extract_principles(self) -> int:
@@ -201,9 +207,7 @@ class MemifyEngine:
         """
         try:
             # 获取高频标签共现
-            co_occurrences = self.storage.get_tag_co_occurrences(
-                min_count=self.memify_config.principle_co_occurrence
-            )
+            co_occurrences = self.storage.get_tag_co_occurrences(min_count=self.memify_config.principle_co_occurrence)
 
             principles_created = 0
 
@@ -218,8 +222,7 @@ class MemifyEngine:
                          AND c.inherited_meta LIKE ?
                          AND c.inherited_meta LIKE ?
                        LIMIT 5""",
-                    (self.memify_config.principle_min_access,
-                     f'%{tag1}%', f'%{tag2}%')
+                    (self.memify_config.principle_min_access, f"%{tag1}%", f"%{tag2}%"),
                 )
 
                 matching_chunks = cursor.fetchall()
@@ -229,33 +232,27 @@ class MemifyEngine:
                     content = chunk[1]
 
                     # 检查是否已存在原则
-                    existing = self.db.execute(
-                        "SELECT id FROM principles WHERE chunk_id = ?",
-                        (chunk_id,)
-                    ).fetchone()
+                    existing = self.db.execute("SELECT id FROM principles WHERE chunk_id = ?", (chunk_id,)).fetchone()
 
                     if existing:
                         continue
 
                     # 生成原则
-                    principle_text = self._generate_principle_text(
-                        content, tag1, tag2
-                    )
+                    principle_text = self._generate_principle_text(content, tag1, tag2)
 
                     if principle_text:
                         self.db.execute(
                             """INSERT INTO principles
                                (chunk_id, principle_text, tags, is_approved)
                                VALUES (?, ?, ?, 0)""",
-                            (chunk_id, principle_text,
-                             f'["{tag1}", "{tag2}"]')
+                            (chunk_id, principle_text, f'["{tag1}", "{tag2}"]'),
                         )
                         principles_created += 1
 
             return principles_created
 
         except Exception as e:
-            print(f"[MemifyEngine] Extract principles error: {e}")
+            logger.info(f"[MemifyEngine] Extract principles error: {e}")
             return 0
 
     def _generate_principle_text(self, content: str, tag1: str, tag2: str) -> str:
@@ -266,7 +263,7 @@ class MemifyEngine:
         完整实现可调用 LLM。
         """
         # 分句
-        sentences = content.replace('。', '。\n').replace('！', '！\n').replace('？', '？\n').split('\n')
+        sentences = content.replace("。", "。\n").replace("！", "！\n").replace("？", "？\n").split("\n")
         sentences = [s.strip() for s in sentences if len(s.strip()) > 20]
 
         if not sentences:
@@ -286,7 +283,7 @@ class MemifyEngine:
             self.db.execute(
                 """INSERT OR REPLACE INTO index_metadata (key, value, updated_at)
                    VALUES ('memory_graph_last_memify', ?, strftime('%s', 'now'))""",
-                (str(self._last_run),)
+                (str(self._last_run),),
             )
             self.db.commit()
         except Exception:
@@ -306,19 +303,17 @@ class MemifyEngine:
         # 获取这些 Chunk 的标签
         for cid in chunk_ids:
             try:
-                row = self.db.execute(
-                    "SELECT inherited_meta FROM chunks WHERE id = ?",
-                    (cid,)
-                ).fetchone()
+                row = self.db.execute("SELECT inherited_meta FROM chunks WHERE id = ?", (cid,)).fetchone()
 
                 if row and row[0]:
                     import json
+
                     meta = json.loads(row[0])
                     tags = meta.get("tags", [])
 
                     # 记录标签共现
                     for i, t1 in enumerate(tags):
-                        for t2 in tags[i + 1:]:
+                        for t2 in tags[i + 1 :]:
                             self.storage.record_tag_co_occurrence(t1, t2)
 
             except Exception:
@@ -354,17 +349,14 @@ class PrincipleManager:
                WHERE p.is_approved = 0
                ORDER BY p.created_at DESC
                LIMIT ?""",
-            (limit,)
+            (limit,),
         )
         return [dict(r) for r in cursor.fetchall()]
 
     def approve_principle(self, principle_id: int) -> bool:
         """批准原则"""
         try:
-            self.db.execute(
-                "UPDATE principles SET is_approved = 1 WHERE id = ?",
-                (principle_id,)
-            )
+            self.db.execute("UPDATE principles SET is_approved = 1 WHERE id = ?", (principle_id,))
             self.db.commit()
             return True
         except Exception:
@@ -373,10 +365,7 @@ class PrincipleManager:
     def reject_principle(self, principle_id: int) -> bool:
         """拒绝原则"""
         try:
-            self.db.execute(
-                "DELETE FROM principles WHERE id = ?",
-                (principle_id,)
-            )
+            self.db.execute("DELETE FROM principles WHERE id = ?", (principle_id,))
             self.db.commit()
             return True
         except Exception:

@@ -36,7 +36,7 @@ def prepare_fts_content(chunk, file_path: str) -> str:
     doc_type = metadata.get("doc_type") or ""
     filename = os.path.basename(file_path)
     section_title = chunk.section_title or ""
-    
+
     # 预计算分词结果，避免重复调用
     seg_filename = jieba_segment(filename)
     seg_section = jieba_segment(section_title)
@@ -44,12 +44,14 @@ def prepare_fts_content(chunk, file_path: str) -> str:
     seg_tags = jieba_segment(tag_str)
     seg_type = jieba_segment(doc_type)
     seg_content = jieba_segment(chunk.content)
-    
+
     # 文件名和章节标题权重加倍（重复一次）
     parts = [
-        seg_filename, seg_filename,  # 文件名权重 x2
+        seg_filename,
+        seg_filename,  # 文件名权重 x2
         seg_path,
-        seg_section, seg_section,    # 章节标题权重 x2
+        seg_section,
+        seg_section,  # 章节标题权重 x2
         seg_tags,
         seg_type,
         seg_content,
@@ -120,15 +122,17 @@ def process_and_commit_batch(
         if file_chunks_collector is not None:
             if file_id not in file_chunks_collector:
                 file_chunks_collector[file_id] = {
-                    'chunks': [],
-                    'file_path': f_path,
-                    'absolute_path': abs_path  # 新增绝对路径
+                    "chunks": [],
+                    "file_path": f_path,
+                    "absolute_path": abs_path,  # 新增绝对路径
                 }
-            file_chunks_collector[file_id]['chunks'].append({
-                'id': new_chunk_id,
-                'content': chunk.content,
-                'metadata': chunk.metadata,
-            })
+            file_chunks_collector[file_id]["chunks"].append(
+                {
+                    "id": new_chunk_id,
+                    "content": chunk.content,
+                    "metadata": chunk.metadata,
+                }
+            )
 
         if db.vec_support:
             db.conn.execute(
@@ -210,7 +214,7 @@ def main():
     files_to_index = []
     if args.force:
         logger.info("🔄 模式：强制重建所有索引")
-        
+
         # 先触发插件钩子，让插件清理它们的数据
         if plugin_loader:
             try:
@@ -218,7 +222,7 @@ def main():
                 plugin_loader.invoke_hook("on_index_rebuild", force=True)
             except Exception as e:
                 logger.warning(f"⚠️ 插件 on_index_rebuild 钩子执行失败: {e}")
-        
+
         # 清理核心表数据
         db.conn.execute("DELETE FROM fts5_index")
         cursor = db.conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='vectors'")
@@ -307,15 +311,21 @@ def main():
 
     try:
         with ThreadPoolExecutor(max_workers=max_concurrent_files) as executor:
-            for f_id, chunks, f_path, abs_path in executor.map(lambda f: process_file_worker(f, splitter), files_to_index):
+            for f_id, chunks, f_path, abs_path in executor.map(
+                lambda f: process_file_worker(f, splitter), files_to_index
+            ):
                 for c in chunks:
                     pending_chunks.append((f_id, c, f_path, abs_path))
                 if chunks:
                     total_files_with_chunks += 1
                 if len(pending_chunks) >= stream_batch_size:
                     global_chunk_idx = process_and_commit_batch(
-                        pending_chunks, embedder, db, global_chunk_idx,
-                        plugin_loader=plugin_loader, file_chunks_collector=file_chunks_collector
+                        pending_chunks,
+                        embedder,
+                        db,
+                        global_chunk_idx,
+                        plugin_loader=plugin_loader,
+                        file_chunks_collector=file_chunks_collector,
                     )
                     total_processed += len(pending_chunks)
                     pending_chunks.clear()
@@ -323,8 +333,12 @@ def main():
                     pbar.update(1)
         if pending_chunks:
             global_chunk_idx = process_and_commit_batch(
-                pending_chunks, embedder, db, global_chunk_idx,
-                plugin_loader=plugin_loader, file_chunks_collector=file_chunks_collector
+                pending_chunks,
+                embedder,
+                db,
+                global_chunk_idx,
+                plugin_loader=plugin_loader,
+                file_chunks_collector=file_chunks_collector,
             )
             total_processed += len(pending_chunks)
             pending_chunks.clear()
@@ -357,9 +371,9 @@ def main():
                 plugin_loader.invoke_hook(
                     "on_file_indexed",
                     file_id=file_id,
-                    chunks=data['chunks'],
-                    filepath=data['file_path'],
-                    absolute_path=data.get('absolute_path', ''),  # 新增绝对路径
+                    chunks=data["chunks"],
+                    filepath=data["file_path"],
+                    absolute_path=data.get("absolute_path", ""),  # 新增绝对路径
                 )
             logger.info("✅ 插件钩子处理完成")
         except Exception as e:

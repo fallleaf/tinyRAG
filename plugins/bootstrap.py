@@ -17,6 +17,7 @@ plugins/bootstrap.py - 插件引导加载器 (v1.0)
     # 触发钩子
     loader.hook('on_file_indexed', file_id=123, chunks=[...])
 """
+
 import importlib
 import importlib.util
 import json
@@ -36,6 +37,7 @@ PLUGINS_DIR = Path(__file__).parent
 @dataclass
 class PluginInfo:
     """插件元信息"""
+
     name: str
     version: str
     description: str = ""
@@ -175,9 +177,9 @@ class PluginLoader:
     def _load_plugin_configs(self) -> None:
         """从配置中加载插件配置项"""
         # 从全局配置中获取 plugins 配置
-        if hasattr(self.config, 'plugins'):
+        if hasattr(self.config, "plugins"):
             for plugin_cfg in self.config.plugins:
-                name = plugin_cfg.get('name') if isinstance(plugin_cfg, dict) else getattr(plugin_cfg, 'name', None)
+                name = plugin_cfg.get("name") if isinstance(plugin_cfg, dict) else getattr(plugin_cfg, "name", None)
                 if name:
                     self._plugin_configs[name] = plugin_cfg if isinstance(plugin_cfg, dict) else plugin_cfg.__dict__
 
@@ -197,9 +199,9 @@ class PluginLoader:
         for plugin_path in PLUGINS_DIR.iterdir():
             if not plugin_path.is_dir():
                 continue
-            if plugin_path.name.startswith('_') or plugin_path.name.startswith('.'):
+            if plugin_path.name.startswith("_") or plugin_path.name.startswith("."):
                 continue
-            if plugin_path.name == '__pycache__':
+            if plugin_path.name == "__pycache__":
                 continue
 
             # 检查是否有 __init__.py 或 plugin.py
@@ -223,7 +225,7 @@ class PluginLoader:
         meta_file = plugin_path / "plugin.json"
         if meta_file.exists():
             try:
-                with open(meta_file, encoding='utf-8') as f:
+                with open(meta_file, encoding="utf-8") as f:
                     meta = json.load(f)
                 return PluginInfo.from_dict(meta)
             except Exception as e:
@@ -234,7 +236,7 @@ class PluginLoader:
             file_path = plugin_path / filename
             if file_path.exists():
                 try:
-                    content = file_path.read_text(encoding='utf-8')
+                    content = file_path.read_text(encoding="utf-8")
                     # 简单解析常量
                     name = self._extract_constant(content, "NAME", plugin_path.name)
                     version = self._extract_constant(content, "VERSION", "0.0.0")
@@ -249,6 +251,7 @@ class PluginLoader:
     def _extract_constant(self, content: str, const_name: str, default: str) -> str:
         """从 Python 文件中提取常量值"""
         import re
+
         pattern = rf'^{const_name}\s*=\s*["\']([^"\']+)["\']'
         match = re.search(pattern, content, re.MULTILINE)
         return match.group(1) if match else default
@@ -287,6 +290,7 @@ class PluginLoader:
             except ModuleNotFoundError:
                 # 如果包没有 __init__.py，创建一个占位模块
                 import types
+
                 plugin_pkg = types.ModuleType(module_name)
                 plugin_pkg.__path__ = [str(plugin_path)]
                 plugin_pkg.__package__ = module_name
@@ -300,9 +304,7 @@ class PluginLoader:
             plugin_class = None
             for attr_name in dir(module):
                 attr = getattr(module, attr_name)
-                if (isinstance(attr, type) and
-                    issubclass(attr, PluginBase) and
-                    attr is not PluginBase):
+                if isinstance(attr, type) and issubclass(attr, PluginBase) and attr is not PluginBase:
                     plugin_class = attr
                     break
 
@@ -314,10 +316,7 @@ class PluginLoader:
             plugin_cfg = self._plugin_configs.get(plugin_name, {})
 
             # 实例化插件
-            plugin_instance = plugin_class(
-                config=plugin_cfg.get('config', {}),
-                context=self.ctx
-            )
+            plugin_instance = plugin_class(config=plugin_cfg.get("config", {}), context=self.ctx)
 
             # 调用 on_load
             if not plugin_instance.on_load():
@@ -348,11 +347,11 @@ class PluginLoader:
         for info in discovered:
             # 检查是否启用
             plugin_cfg = self._plugin_configs.get(info.name, {})
-            enabled = plugin_cfg.get('enabled', info.enabled)
+            enabled = plugin_cfg.get("enabled", info.enabled)
 
             # 如果配置中有显式设置，以配置为准
-            if 'enabled' in plugin_cfg:
-                enabled = plugin_cfg['enabled']
+            if "enabled" in plugin_cfg:
+                enabled = plugin_cfg["enabled"]
 
             if not enabled:
                 logger.info(f"⏭️ 插件 {info.name} 已禁用，跳过加载")
@@ -434,6 +433,7 @@ class PluginLoader:
             try:
                 # 检查是否已在异步上下文中
                 loop = asyncio.get_running_loop()
+
                 # 如果在异步上下文中，任务已提交，等待完成
                 async def wait_tasks():
                     for name, task in pending_tasks:
@@ -441,6 +441,7 @@ class PluginLoader:
                             await task
                         except Exception as e:
                             logger.error(f"插件 {name} 异步钩子 {event} 执行失败: {e}")
+
                 # 创建一个包装任务来等待所有任务
                 _background_task = asyncio.create_task(wait_tasks())  # noqa: RUF006
                 # 注意：在同步上下文中我们无法等待异步任务完成
@@ -456,6 +457,7 @@ class PluginLoader:
                         except Exception as e:
                             logger.error(f"插件 {name} 异步钩子 {event} 执行失败: {e}")
                     return task_results
+
                 results.extend(asyncio.run(run_all_tasks()))
 
         return results
@@ -476,7 +478,7 @@ class PluginLoader:
                 continue
 
             # 检查插件是否定义了 TOOLS 属性
-            if hasattr(plugin, 'TOOLS'):
+            if hasattr(plugin, "TOOLS"):
                 for tool_cls in plugin.TOOLS:
                     try:
                         registry.register(tool_cls)

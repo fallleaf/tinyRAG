@@ -7,6 +7,7 @@ plugin_manager.py - 插件管理器
 - 钩子调度
 - 配置热加载
 """
+
 import asyncio
 import sqlite3
 from dataclasses import dataclass, field
@@ -15,12 +16,15 @@ from typing import Any
 
 import yaml
 
+from loguru import logger
+
 from plugins.tinyrag_memory_graph.hooks import HookContext, HookResult, HookType
 
 
 @dataclass
 class PluginInfo:
     """插件信息"""
+
     name: str
     version: str
     enabled: bool = True
@@ -62,9 +66,7 @@ class PluginManager:
         self._plugins: dict[str, PluginInfo] = {}
 
         # 钩子注册表：{hook_type: [(plugin_name, hook_func, priority)]}
-        self._hooks: dict[HookType, list[tuple]] = field(default_factory=lambda: {
-            hook: [] for hook in HookType
-        })
+        self._hooks: dict[HookType, list[tuple]] = field(default_factory=lambda: {hook: [] for hook in HookType})
 
         # 配置
         self._config: dict = {}
@@ -89,7 +91,7 @@ class PluginManager:
                 with open(path, encoding="utf-8") as f:
                     self._config = yaml.safe_load(f) or {}
         except Exception as e:
-            print(f"[PluginManager] Config load error: {e}")
+            logger.info(f"[PluginManager] Config load error: {e}")
 
     def reload_config(self):
         """热重载配置"""
@@ -113,6 +115,7 @@ class PluginManager:
         # 1. 通过 entry_points 发现
         try:
             from importlib.metadata import entry_points
+
             eps = entry_points(group="tinyrag.plugins")
             for ep in eps:
                 discovered.append(ep.name)
@@ -128,8 +131,7 @@ class PluginManager:
 
         return list(set(discovered))
 
-    def register_plugin(self, name: str, plugin_instance: Any,
-                        priority: int = 100) -> bool:
+    def register_plugin(self, name: str, plugin_instance: Any, priority: int = 100) -> bool:
         """
         注册插件
 
@@ -159,11 +161,11 @@ class PluginManager:
             # 注册钩子
             self._register_hooks(name, plugin_instance, priority)
 
-            print(f"[PluginManager] Plugin registered: {name} (enabled={enabled})")
+            logger.info(f"[PluginManager] Plugin registered: {name} (enabled={enabled})")
             return True
 
         except Exception as e:
-            print(f"[PluginManager] Failed to register plugin {name}: {e}")
+            logger.info(f"[PluginManager] Failed to register plugin {name}: {e}")
             return False
 
     def _register_hooks(self, plugin_name: str, plugin: Any, priority: int):
@@ -190,10 +192,7 @@ class PluginManager:
 
         # 移除钩子
         for hook_type in self._hooks:
-            self._hooks[hook_type] = [
-                (pn, m, p) for pn, m, p in self._hooks[hook_type]
-                if pn != name
-            ]
+            self._hooks[hook_type] = [(pn, m, p) for pn, m, p in self._hooks[hook_type] if pn != name]
 
         del self._plugins[name]
         return True
@@ -221,6 +220,7 @@ class PluginManager:
 
             try:
                 import time
+
                 start = time.time()
 
                 # 调用钩子
@@ -242,7 +242,7 @@ class PluginManager:
             except Exception as e:
                 self._metrics["hooks_failed"] += 1
                 results.append(HookResult.fail(f"Hook {plugin_name}.{hook_func.__name__} error: {e}"))
-                print(f"[PluginManager] Hook error: {e}")
+                logger.info(f"[PluginManager] Hook error: {e}")
 
         return results
 
@@ -260,7 +260,7 @@ class PluginManager:
                         await info.instance.initialize()
 
                 except Exception as e:
-                    print(f"[PluginManager] Failed to initialize plugin {name}: {e}")
+                    logger.info(f"[PluginManager] Failed to initialize plugin {name}: {e}")
 
     async def start_plugins(self):
         """启动所有已注册的插件"""
@@ -270,7 +270,7 @@ class PluginManager:
                     if hasattr(info.instance, "start"):
                         await info.instance.start()
                 except Exception as e:
-                    print(f"[PluginManager] Failed to start plugin {name}: {e}")
+                    logger.info(f"[PluginManager] Failed to start plugin {name}: {e}")
 
     async def stop_plugins(self):
         """停止所有已注册的插件"""
@@ -280,7 +280,7 @@ class PluginManager:
                     if hasattr(info.instance, "stop"):
                         await info.instance.stop()
                 except Exception as e:
-                    print(f"[PluginManager] Failed to stop plugin {name}: {e}")
+                    logger.info(f"[PluginManager] Failed to stop plugin {name}: {e}")
 
     def get_plugin(self, name: str) -> Any | None:
         """获取插件实例"""
@@ -316,8 +316,7 @@ def get_plugin_manager() -> PluginManager:
     return _global_manager
 
 
-def init_plugin_manager(db_conn: sqlite3.Connection,
-                        config_path: str | None = None) -> PluginManager:
+def init_plugin_manager(db_conn: sqlite3.Connection, config_path: str | None = None) -> PluginManager:
     """初始化全局插件管理器"""
     global _global_manager
     _global_manager = PluginManager(db_conn, config_path)

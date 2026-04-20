@@ -4,6 +4,7 @@
 合并三个词典文件，去重并统一频率
 """
 
+from loguru import logger
 from collections import defaultdict
 from pathlib import Path
 
@@ -22,10 +23,10 @@ entries = defaultdict(dict)  # {词: {freq: 频率, source: 来源文件}}
 for dict_file in dict_files:
     file_path = data_dir / dict_file
     if not file_path.exists():
-        print(f"警告: 文件不存在 {dict_file}")
+        logger.info(f"警告: 文件不存在 {dict_file}")
         continue
 
-    print(f"解析文件: {dict_file}")
+    logger.info(f"解析文件: {dict_file}")
     with open(file_path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
@@ -46,7 +47,7 @@ for dict_file in dict_files:
                 if word not in entries or freq > entries[word]["freq"]:
                     entries[word] = {"freq": freq, "source": dict_file}
 
-print(f"\n总共找到 {len(entries)} 个唯一词条")
+logger.info(f"\n总共找到 {len(entries)} 个唯一词条")
 
 # 按频率排序
 sorted_entries = sorted(entries.items(), key=lambda x: (-x[1]["freq"], x[0]))
@@ -64,9 +65,9 @@ with open(output_file, "w", encoding="utf-8") as f:
     for word, info in sorted_entries:
         f.write(f"{word} {info['freq']} n\n")
 
-print(f"\n整合完成，输出文件: {output_file}")
-print("词条统计:")
-print(f"  - 总词条数: {len(sorted_entries)}")
-print(f"  - 频率 >= 1000: {sum(1 for _, info in sorted_entries if info['freq'] >= 1000)}")
-print(f"  - 频率 >= 500: {sum(1 for _, info in sorted_entries if info['freq'] >= 500)}")
-print(f"  - 频率 >= 100: {sum(1 for _, info in sorted_entries if info['freq'] >= 100)}")
+logger.info(f"\n整合完成，输出文件: {output_file}")
+logger.info("词条统计:")
+logger.info(f"  - 总词条数: {len(sorted_entries)}")
+logger.info(f"  - 频率 >= 1000: {sum(1 for _, info in sorted_entries if info['freq'] >= 1000)}")
+logger.info(f"  - 频率 >= 500: {sum(1 for _, info in sorted_entries if info['freq'] >= 500)}")
+logger.info(f"  - 频率 >= 100: {sum(1 for _, info in sorted_entries if info['freq'] >= 100)}")

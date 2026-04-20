@@ -10,6 +10,7 @@ mcp_server/server.py - Production MCP RAG Server (v2.2 - 插件支持)
 - P2: 增强异步锁边界，修复资源释放竞态条件
 - P3: 集成插件系统，支持动态加载扩展功能
 """
+
 import asyncio
 import contextlib
 import importlib.util
@@ -40,6 +41,7 @@ try:
         TextResourceContents,
         Tool,
     )
+
     MCP_AVAILABLE = True
 except ImportError:
     MCP_AVAILABLE = False
@@ -59,6 +61,7 @@ PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 logger = setup_logger(level="INFO", enable_stderr=False)  # MCP 模式禁用 stderr，避免干扰 JSON 协议
 _BUILD_INDEX_MODULE_KEY = "_tinyrag_build_index"
 
+
 def _load_build_index_main():
     if _BUILD_INDEX_MODULE_KEY in sys.modules:
         return sys.modules[_BUILD_INDEX_MODULE_KEY].main
@@ -70,6 +73,7 @@ def _load_build_index_main():
     sys.modules[_BUILD_INDEX_MODULE_KEY] = module
     spec.loader.exec_module(module)
     return module.main
+
 
 # =====================
 # App Context
@@ -148,9 +152,11 @@ class AppContext:
 
     def add_background_task(self, task: asyncio.Task):
         self._background_tasks.append(task)
+
         def _on_done(t: asyncio.Task):
             with contextlib.suppress(ValueError):
                 self._background_tasks.remove(t)
+
         task.add_done_callback(_on_done)
 
     async def shutdown(self):
@@ -174,6 +180,7 @@ class AppContext:
                 logger.warning(f"Database close error (ignored): {e}")
         logger.info("Resources released")
 
+
 # =====================
 # Error Wrapper & Tool Base
 # =====================
@@ -184,18 +191,24 @@ def mcp_safe(func: Callable[..., Awaitable[list[TextContent]]]):
         except Exception as e:
             logger.error(f"Tool error: {e}", exc_info=True)
             return [TextContent(type="text", text=json.dumps({"error": str(e)}, ensure_ascii=False))]
+
     return wrapper
+
 
 class BaseTool:
     name: str
     description: str
     schema: dict[str, Any]
+
     def __init__(self, ctx: AppContext):
         self.ctx = ctx
+
     async def run(self, args: dict[str, Any]) -> dict[str, Any]:
         raise NotImplementedError
+
     def to_mcp_tool(self) -> Tool:
         return Tool(name=self.name, description=self.description, inputSchema=self.schema)
+
 
 # =====================
 # Tools
@@ -211,6 +224,7 @@ class SearchTool(BaseTool):
         },
         "required": ["query"],
     }
+
     async def run(self, args: dict[str, Any]) -> dict[str, Any]:
         await self.ctx.initialize()
         query = args.get("query", "")
@@ -242,40 +256,45 @@ class SearchTool(BaseTool):
                     results=[r.__dict__ for r in results],
                     query_vec=query_vec,
                     base_alpha=alpha,  # 传递基础检索的 alpha 权重
-                    base_beta=beta,    # 传递基础检索的 beta 权重
+                    base_beta=beta,  # 传递基础检索的 beta 权重
                 )
 
                 if enhanced_results and isinstance(enhanced_results, list) and len(enhanced_results) > 0:
                     first_result = enhanced_results[0]
                     if isinstance(first_result, list) and len(first_result) > 0:
                         from retriever.hybrid_engine import RetrievalResult
+
                         plugin_results = []
                         for r in first_result:
                             if isinstance(r, RetrievalResult):
                                 plugin_results.append(r)
                             elif isinstance(r, dict):
-                                plugin_results.append(RetrievalResult(
-                                    chunk_id=r.get("chunk_id", 0),
-                                    content=r.get("content", ""),
-                                    file_path=r.get("file_path", ""),
-                                    absolute_path=r.get("absolute_path", r.get("file_path", "")),
-                                    section=r.get("section", ""),
-                                    start_pos=r.get("start_pos", 0),
-                                    end_pos=r.get("end_pos", 0),
-                                    vault_name=r.get("vault_name", ""),
-                                    chunk_type=r.get("chunk_type", ""),
-                                    semantic_score=r.get("semantic_score", r.get("vector_score", 0.0)),
-                                    keyword_score=r.get("keyword_score", 0.0),
-                                    confidence_score=r.get("confidence_score", 1.0),
-                                    final_score=r.get("final_score", r.get("score", 0.0)),
-                                    confidence_reason=r.get("confidence_reason", ""),
-                                    file_hash=r.get("file_hash", ""),
-                                    graph_score=r.get("graph_score", 0.0),
-                                    preference_score=r.get("preference_score", 0.0),
-                                    hop_distance=r.get("hop_distance", 0),
-                                    # 基础检索分数
-                                    base_final_score=r.get("base_final_score", r.get("final_score", r.get("score", 0.0))),
-                                ))
+                                plugin_results.append(
+                                    RetrievalResult(
+                                        chunk_id=r.get("chunk_id", 0),
+                                        content=r.get("content", ""),
+                                        file_path=r.get("file_path", ""),
+                                        absolute_path=r.get("absolute_path", r.get("file_path", "")),
+                                        section=r.get("section", ""),
+                                        start_pos=r.get("start_pos", 0),
+                                        end_pos=r.get("end_pos", 0),
+                                        vault_name=r.get("vault_name", ""),
+                                        chunk_type=r.get("chunk_type", ""),
+                                        semantic_score=r.get("semantic_score", r.get("vector_score", 0.0)),
+                                        keyword_score=r.get("keyword_score", 0.0),
+                                        confidence_score=r.get("confidence_score", 1.0),
+                                        final_score=r.get("final_score", r.get("score", 0.0)),
+                                        confidence_reason=r.get("confidence_reason", ""),
+                                        file_hash=r.get("file_hash", ""),
+                                        graph_score=r.get("graph_score", 0.0),
+                                        preference_score=r.get("preference_score", 0.0),
+                                        hop_distance=r.get("hop_distance", 0),
+                                        # 基础检索分数
+                                        base_final_score=r.get(
+                                            "base_final_score", r.get("final_score", r.get("score", 0.0))
+                                        ),
+                                    )
+                                )
                         if plugin_results:
                             results = plugin_results
                             logger.info(f"✅ MCP 插件增强了 {len(results)} 条结果（统一评分 + 图谱分值）")
@@ -296,11 +315,11 @@ class SearchTool(BaseTool):
                 "confidence_reason": r.confidence_reason,
             }
             if plugin_enabled:
-                result_item["graph_score"] = round(getattr(r, 'graph_score', 0.0), 4)
-                result_item["preference_score"] = round(getattr(r, 'preference_score', 0.0), 4)
-                result_item["hop_distance"] = getattr(r, 'hop_distance', 0)
+                result_item["graph_score"] = round(getattr(r, "graph_score", 0.0), 4)
+                result_item["preference_score"] = round(getattr(r, "preference_score", 0.0), 4)
+                result_item["hop_distance"] = getattr(r, "hop_distance", 0)
                 # 添加基础检索分数便于调试和验证
-                result_item["base_final_score"] = round(getattr(r, 'base_final_score', r.final_score), 4)
+                result_item["base_final_score"] = round(getattr(r, "base_final_score", r.final_score), 4)
             output_results.append(result_item)
 
         return {
@@ -309,6 +328,7 @@ class SearchTool(BaseTool):
             "plugin_enabled": plugin_enabled,
             "results": output_results,
         }
+
 
 class ScanTool(BaseTool):
     name, description = "scan_index", "Incrementally scan and update file index (tinyRAG)"
@@ -368,31 +388,51 @@ class ScanTool(BaseTool):
                 for idx, ((file_id, chunk, f_path, abs_path), emb) in enumerate(zip(batch, embeddings, strict=False)):
                     global_idx = processed + idx
                     metadata_json = json.dumps(chunk.metadata or {}, ensure_ascii=False, default=_json_serialize)
-                    confidence_json = json.dumps(chunk.confidence_metadata or {}, ensure_ascii=False, default=_json_serialize)
+                    confidence_json = json.dumps(
+                        chunk.confidence_metadata or {}, ensure_ascii=False, default=_json_serialize
+                    )
                     cursor = self.ctx.db.conn.execute(
                         """INSERT INTO chunks (file_id, chunk_index, content, content_type, section_title, section_path,
                         start_pos, end_pos, confidence_final_weight, metadata, confidence_json)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                        (file_id, global_idx, chunk.content, chunk.content_type.value, chunk.section_title,
-                         chunk.section_path, chunk.start_pos, chunk.end_pos, 1.0, metadata_json, confidence_json),
+                        (
+                            file_id,
+                            global_idx,
+                            chunk.content,
+                            chunk.content_type.value,
+                            chunk.section_title,
+                            chunk.section_path,
+                            chunk.start_pos,
+                            chunk.end_pos,
+                            1.0,
+                            metadata_json,
+                            confidence_json,
+                        ),
                     )
                     new_chunk_id = cursor.lastrowid
                     inserted_chunk_ids.append((new_chunk_id, file_id, chunk, f_path))
 
                     if file_id not in file_chunks_collector:
-                                        file_chunks_collector[file_id] = {'chunks': [], 'file_path': f_path, 'absolute_path': abs_path}
-                    file_chunks_collector[file_id]['chunks'].append({
-                        'id': new_chunk_id,
-                        'content': chunk.content,
-                        'metadata': chunk.metadata,
-                    })
+                        file_chunks_collector[file_id] = {"chunks": [], "file_path": f_path, "absolute_path": abs_path}
+                    file_chunks_collector[file_id]["chunks"].append(
+                        {
+                            "id": new_chunk_id,
+                            "content": chunk.content,
+                            "metadata": chunk.metadata,
+                        }
+                    )
 
                     if self.ctx.db.vec_support:
                         import array
-                        self.ctx.db.conn.execute("INSERT INTO vectors (chunk_id, embedding) VALUES (?, ?)",
-                                                 (new_chunk_id, array.array("f", emb).tobytes()))
-                    self.ctx.db.conn.execute("INSERT INTO fts5_index (rowid, content) VALUES (?, ?)",
-                                             (new_chunk_id, _prepare_fts_content(chunk, f_path)))
+
+                        self.ctx.db.conn.execute(
+                            "INSERT INTO vectors (chunk_id, embedding) VALUES (?, ?)",
+                            (new_chunk_id, array.array("f", emb).tobytes()),
+                        )
+                    self.ctx.db.conn.execute(
+                        "INSERT INTO fts5_index (rowid, content) VALUES (?, ?)",
+                        (new_chunk_id, _prepare_fts_content(chunk, f_path)),
+                    )
                 self.ctx.db.conn.commit()
                 processed += len(batch)
 
@@ -424,9 +464,9 @@ class ScanTool(BaseTool):
                     self.ctx.plugin_loader.invoke_hook(
                         "on_file_indexed",
                         file_id=file_id,
-                        chunks=data['chunks'],
-                        filepath=data['file_path'],
-                        absolute_path=data.get('absolute_path', ''),  # 传递绝对路径
+                        chunks=data["chunks"],
+                        filepath=data["file_path"],
+                        absolute_path=data.get("absolute_path", ""),  # 传递绝对路径
                     )
                 logger.info("✅ 插件钩子处理完成")
             except Exception as e:
@@ -443,14 +483,21 @@ class ScanTool(BaseTool):
         changed_paths.extend([f.new_absolute_path for f in report.moved_files])
         if changed_paths:
             await self._index_changed_files(changed_paths)
-        return {"status": "success", "summary": report.summary(),
-                "new": len(report.new_files), "modified": len(report.modified_files),
-                "moved": len(report.moved_files), "deleted": len(report.deleted_files),
-                "touched": len(report.touched_files)}
+        return {
+            "status": "success",
+            "summary": report.summary(),
+            "new": len(report.new_files),
+            "modified": len(report.modified_files),
+            "moved": len(report.moved_files),
+            "deleted": len(report.deleted_files),
+            "touched": len(report.touched_files),
+        }
+
 
 class RebuildTool(BaseTool):
     name, description = "rebuild_index", "Force rebuild full knowledge index (tinyRAG)"
     schema: ClassVar[dict] = {"type": "object", "properties": {}}
+
     async def run(self, args: dict[str, Any]) -> dict[str, Any]:
         task = asyncio.create_task(self._background_job(args))
         self.ctx.add_background_task(task)
@@ -462,6 +509,7 @@ class RebuildTool(BaseTool):
             logger.info("Starting background index rebuild...")
             build_main = _load_build_index_main()
             import argparse
+
             batch_size = self.ctx.config.embedding_model.batch_size
             build_args = argparse.Namespace(force=True, batch_size=batch_size)
             await asyncio.to_thread(build_main, build_args)
@@ -470,14 +518,18 @@ class RebuildTool(BaseTool):
             logger.error(f"Index rebuild failed: {e}", exc_info=True)
             raise
 
+
 class StatsTool(BaseTool):
     name, description = "stats", "Get knowledge base statistics (tinyRAG)"
     schema: ClassVar[dict] = {"type": "object", "properties": {}}
+
     async def run(self, args: dict[str, Any]) -> dict[str, Any]:
         await self.ctx.initialize()
         db = self.ctx.db
         files_total = db.conn.execute("SELECT COUNT(*) FROM files WHERE is_deleted = 0").fetchone()[0]
-        files_by_vault = db.conn.execute("SELECT vault_name, COUNT(*) as cnt FROM files WHERE is_deleted = 0 GROUP BY vault_name").fetchall()
+        files_by_vault = db.conn.execute(
+            "SELECT vault_name, COUNT(*) as cnt FROM files WHERE is_deleted = 0 GROUP BY vault_name"
+        ).fetchall()
         chunks_total = db.conn.execute("SELECT COUNT(*) FROM chunks WHERE is_deleted = 0").fetchone()[0]
         try:
             vectors_total = db.conn.execute("SELECT COUNT(*) FROM vectors").fetchone()[0]
@@ -492,43 +544,54 @@ class StatsTool(BaseTool):
             "model": {"name": self.ctx.config.embedding_model.name, "size": self.ctx.config.embedding_model.size},
         }
 
+
 class ConfigTool(BaseTool):
     name, description = "config", "Get complete tinyRAG configuration (includes exclude, cache, maintenance, etc.)"
     schema: ClassVar[dict] = {"type": "object", "properties": {}}
+
     async def run(self, args: dict[str, Any]) -> dict[str, Any]:
         await self.ctx.initialize()
-        cfg_dict = self.ctx.config.model_dump(mode='json')
+        cfg_dict = self.ctx.config.model_dump(mode="json")
         if "vaults" in cfg_dict and isinstance(cfg_dict["vaults"], list):
             for v in cfg_dict["vaults"]:
                 if not v.get("exclude") or v["exclude"] is None:
                     v["exclude"] = {"dirs": [], "patterns": []}
         return cfg_dict
 
+
 class ReloadConfigTool(BaseTool):
     name, description = "reload_config", "Hot-reload config.yaml and reinit retriever/splitter without restart"
     schema: ClassVar[dict] = {"type": "object", "properties": {}}
+
     async def run(self, args: dict[str, Any]) -> dict[str, Any]:
         await self.ctx.initialize()
         new_cfg = load_config(str(PROJECT_ROOT / "config.yaml"))
         async with self.ctx._lock:
             self.ctx.config = new_cfg
             self.ctx.splitter = MarkdownSplitter(new_cfg)
-            self.ctx.retriever = HybridEngine(config=new_cfg, db=self.ctx.db, embed_engine=self.ctx.retriever.embed_engine)
+            self.ctx.retriever = HybridEngine(
+                config=new_cfg, db=self.ctx.db, embed_engine=self.ctx.retriever.embed_engine
+            )
             new_excludes = {}
             for v in new_cfg.vaults:
                 if v.enabled:
-                    new_excludes[v.name] = (frozenset(v.exclude.dirs), v.exclude.patterns) if v.exclude else (frozenset(), [])
+                    new_excludes[v.name] = (
+                        (frozenset(v.exclude.dirs), v.exclude.patterns) if v.exclude else (frozenset(), [])
+                    )
             self.ctx.vault_excludes = new_excludes
         logger.info("✅ Configuration reloaded successfully")
         return {"status": "reloaded", "retrieval": new_cfg.retrieval}
 
+
 class MaintenanceTool(BaseTool):
     name, description = "maintenance", "Run DB cleanup & VACUUM (tinyRAG)"
     schema: ClassVar[dict] = {"type": "object", "properties": {"dry_run": {"type": "boolean", "default": False}}}
+
     async def run(self, args: dict[str, Any]) -> dict[str, Any]:
         await self.ctx.initialize()
         dry_run = args.get("dry_run", False)
         import vacuum as vac_mod
+
         stats = vac_mod.check_vacuum_needed(self.ctx.db, self.ctx.config)
         if dry_run:
             return {"status": "dry_run", "stats": stats, "recommendation": "Execute without dry_run to reclaim space."}
@@ -536,18 +599,39 @@ class MaintenanceTool(BaseTool):
         vac_mod.execute_vacuum(self.ctx.db, dry_run=False)
         return {"status": "completed", "reclaimed_space_mb": stats.get("file_size_mb", 0)}
 
+
 # =====================
 # Resources & Prompts
 # =====================
 class ResourceManager:
-    def __init__(self, ctx: AppContext): self.ctx = ctx
-    def list_resources(self) -> list[Resource]: return []
+    def __init__(self, ctx: AppContext):
+        self.ctx = ctx
+
+    def list_resources(self) -> list[Resource]:
+        return []
+
     def list_resource_templates(self) -> list[ResourceTemplate]:
         return [
-            ResourceTemplate(uriTemplate="tinyrag://vault/{vault_name}", name="Vault Statistics", description="Vault stats", mimeType="application/json"),
-            ResourceTemplate(uriTemplate="tinyrag://file/{file_id}", name="File Content", description="File content", mimeType="application/json"),
-            ResourceTemplate(uriTemplate="tinyrag://chunks/{file_id}", name="File Chunks", description="File chunks", mimeType="application/json"),
+            ResourceTemplate(
+                uriTemplate="tinyrag://vault/{vault_name}",
+                name="Vault Statistics",
+                description="Vault stats",
+                mimeType="application/json",
+            ),
+            ResourceTemplate(
+                uriTemplate="tinyrag://file/{file_id}",
+                name="File Content",
+                description="File content",
+                mimeType="application/json",
+            ),
+            ResourceTemplate(
+                uriTemplate="tinyrag://chunks/{file_id}",
+                name="File Chunks",
+                description="File chunks",
+                mimeType="application/json",
+            ),
         ]
+
     async def read_resource(self, uri: Any) -> ReadResourceResult:
         await self.ctx.initialize()
         uri_str = str(uri)
@@ -560,14 +644,33 @@ class ResourceManager:
             content = self._get_file_chunks(uri_str.split("/")[-1])
         else:
             raise ValueError(f"Unknown resource URI: {uri_str}")
-        return ReadResourceResult(contents=[TextResourceContents(uri=uri_str, mimeType="application/json", text=content)])
+        return ReadResourceResult(
+            contents=[TextResourceContents(uri=uri_str, mimeType="application/json", text=content)]
+        )
 
     def _get_vault_stats(self, vault_name: str) -> str:
         db = self.ctx.db
-        files_count = db.conn.execute("SELECT COUNT(*) FROM files WHERE vault_name = ? AND is_deleted = 0", (vault_name,)).fetchone()[0]
-        chunks_count = db.conn.execute("SELECT COUNT(*) FROM chunks c JOIN files f ON c.file_id = f.id WHERE f.vault_name = ? AND c.is_deleted = 0", (vault_name,)).fetchone()[0]
-        recent = db.conn.execute("SELECT file_path, mtime, file_size FROM files WHERE vault_name = ? AND is_deleted = 0 ORDER BY updated_at DESC LIMIT 5", (vault_name,)).fetchall()
-        return json.dumps({"vault_name": vault_name, "files": files_count, "chunks": chunks_count, "recent": [dict(r) for r in recent]}, ensure_ascii=False, indent=2)
+        files_count = db.conn.execute(
+            "SELECT COUNT(*) FROM files WHERE vault_name = ? AND is_deleted = 0", (vault_name,)
+        ).fetchone()[0]
+        chunks_count = db.conn.execute(
+            "SELECT COUNT(*) FROM chunks c JOIN files f ON c.file_id = f.id WHERE f.vault_name = ? AND c.is_deleted = 0",
+            (vault_name,),
+        ).fetchone()[0]
+        recent = db.conn.execute(
+            "SELECT file_path, mtime, file_size FROM files WHERE vault_name = ? AND is_deleted = 0 ORDER BY updated_at DESC LIMIT 5",
+            (vault_name,),
+        ).fetchall()
+        return json.dumps(
+            {
+                "vault_name": vault_name,
+                "files": files_count,
+                "chunks": chunks_count,
+                "recent": [dict(r) for r in recent],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
 
     def _get_file_content(self, file_id: str) -> str:
         try:
@@ -588,12 +691,21 @@ class ResourceManager:
             fid = int(file_id)
         except ValueError:
             return json.dumps({"error": "Invalid file_id"})
-        chunks = self.ctx.db.conn.execute("SELECT id, chunk_index, content, content_type, section_title FROM chunks WHERE file_id = ? AND is_deleted = 0 ORDER BY chunk_index", (fid,)).fetchall()
-        return json.dumps({"file_id": fid, "total": len(chunks), "chunks": [dict(c) for c in chunks]}, ensure_ascii=False, indent=2)
+        chunks = self.ctx.db.conn.execute(
+            "SELECT id, chunk_index, content, content_type, section_title FROM chunks WHERE file_id = ? AND is_deleted = 0 ORDER BY chunk_index",
+            (fid,),
+        ).fetchall()
+        return json.dumps(
+            {"file_id": fid, "total": len(chunks), "chunks": [dict(c) for c in chunks]}, ensure_ascii=False, indent=2
+        )
+
 
 PROMPTS_DIR = PROJECT_ROOT / "prompts"
-DEFAULT_PROMPT_SEARCH = "你是一个知识库助手。请基于以下检索结果回答用户问题。\n## 用户问题\n{{query}}\n## 知识库检索结果\n{{context}}"
+DEFAULT_PROMPT_SEARCH = (
+    "你是一个知识库助手。请基于以下检索结果回答用户问题。\n## 用户问题\n{{query}}\n## 知识库检索结果\n{{context}}"
+)
 DEFAULT_PROMPT_SUMMARIZE = "请总结以下文档的核心内容。\n## 文档信息\n路径: {{file_path}}\n## 文档内容\n{{content}}"
+
 
 def _load_prompt_template(filename: str, default: str) -> str:
     p = PROMPTS_DIR / filename
@@ -604,16 +716,27 @@ def _load_prompt_template(filename: str, default: str) -> str:
             return default
     return default
 
+
 class PromptManager:
     def __init__(self, ctx: AppContext):
         self.ctx = ctx
         self._tpl_search = _load_prompt_template("prompt_search_with_context.md", DEFAULT_PROMPT_SEARCH)
         self._tpl_sum = _load_prompt_template("prompt_summarize_document.md", DEFAULT_PROMPT_SUMMARIZE)
+
     def list_prompts(self) -> list[Prompt]:
         return [
-            Prompt(name="search_with_context", description="RAG answer prompt", arguments=[PromptArgument(name="query", required=True), PromptArgument(name="top_k", required=False)]),
-            Prompt(name="summarize_document", description="Summarize doc prompt", arguments=[PromptArgument(name="file_path", required=True)])
+            Prompt(
+                name="search_with_context",
+                description="RAG answer prompt",
+                arguments=[PromptArgument(name="query", required=True), PromptArgument(name="top_k", required=False)],
+            ),
+            Prompt(
+                name="summarize_document",
+                description="Summarize doc prompt",
+                arguments=[PromptArgument(name="file_path", required=True)],
+            ),
         ]
+
     async def get_prompt(self, name: str, arguments: dict[str, str]) -> GetPromptResult:
         await self.ctx.initialize()
         if name == "search_with_context":
@@ -621,6 +744,7 @@ class PromptManager:
         elif name == "summarize_document":
             return self._prompt_summarize(arguments)
         raise ValueError(f"Unknown prompt: {name}")
+
     def _render(self, tpl: str, vars: dict) -> str:
         for k, v in vars.items():
             tpl = tpl.replace(f"{{{{{k}}}}}", str(v))
@@ -630,28 +754,41 @@ class PromptManager:
         query = args.get("query", "")
         top_k = int(args.get("top_k", "5"))
         results = self.ctx.retriever.search(query, limit=top_k)
-        ctx = "\n".join([f"【文档 {i+1}】{r.file_path}\n内容: {r.content[:300]}" for i, r in enumerate(results)]) or "无结果"
+        ctx = (
+            "\n".join([f"【文档 {i + 1}】{r.file_path}\n内容: {r.content[:300]}" for i, r in enumerate(results)])
+            or "无结果"
+        )
         return GetPromptResult(
             description=f"检索回答: {query}",
             messages=[
                 PromptMessage(
                     role="user",
                     content=TextContent(
-                        type="text",
-                        text=self._render(self._tpl_search, {"query": query, "context": ctx})
-                    )
+                        type="text", text=self._render(self._tpl_search, {"query": query, "context": ctx})
+                    ),
                 )
-            ]
+            ],
         )
 
     def _prompt_summarize(self, args: dict) -> GetPromptResult:
         fp = args.get("file_path", "")
-        row = self.ctx.db.conn.execute("SELECT id, file_path FROM files WHERE file_path = ? AND is_deleted = 0", (fp,)).fetchone()
+        row = self.ctx.db.conn.execute(
+            "SELECT id, file_path FROM files WHERE file_path = ? AND is_deleted = 0", (fp,)
+        ).fetchone()
         if not row:
-            row = self.ctx.db.conn.execute("SELECT id, file_path FROM files WHERE file_path LIKE ? AND is_deleted = 0 LIMIT 1", (f"%{os.path.basename(fp)}",)).fetchone()
+            row = self.ctx.db.conn.execute(
+                "SELECT id, file_path FROM files WHERE file_path LIKE ? AND is_deleted = 0 LIMIT 1",
+                (f"%{os.path.basename(fp)}",),
+            ).fetchone()
         if not row:
-            return GetPromptResult(description=f"摘要: {fp}", messages=[PromptMessage(role="user", content=TextContent(type="text", text=f"未找到: {fp}"))])
-        chunks = self.ctx.db.conn.execute("SELECT content, section_title, confidence_json FROM chunks WHERE file_id = ? AND is_deleted = 0 ORDER BY chunk_index", (row["id"],)).fetchall()
+            return GetPromptResult(
+                description=f"摘要: {fp}",
+                messages=[PromptMessage(role="user", content=TextContent(type="text", text=f"未找到: {fp}"))],
+            )
+        chunks = self.ctx.db.conn.execute(
+            "SELECT content, section_title, confidence_json FROM chunks WHERE file_id = ? AND is_deleted = 0 ORDER BY chunk_index",
+            (row["id"],),
+        ).fetchall()
         content = "\n".join(f"### {c['section_title'] or '正文'}\n{c['content']}" for c in chunks)[:8000]
         conf = json.loads(chunks[0]["confidence_json"]) if chunks and chunks[0]["confidence_json"] else {}
         return GetPromptResult(
@@ -661,17 +798,21 @@ class PromptManager:
                     role="user",
                     content=TextContent(
                         type="text",
-                        text=self._render(self._tpl_sum, {
-                            "file_path": row["file_path"],
-                            "doc_type": conf.get("doc_type",""),
-                            "status": conf.get("status",""),
-                            "final_date": conf.get("final_date",""),
-                            "content": content
-                        })
-                    )
+                        text=self._render(
+                            self._tpl_sum,
+                            {
+                                "file_path": row["file_path"],
+                                "doc_type": conf.get("doc_type", ""),
+                                "status": conf.get("status", ""),
+                                "final_date": conf.get("final_date", ""),
+                                "content": content,
+                            },
+                        ),
+                    ),
                 )
-            ]
+            ],
         )
+
 
 # =====================
 # Helpers
@@ -686,15 +827,24 @@ def _prepare_fts_content(chunk, file_path: str) -> str:
     doc_type = metadata.get("doc_type") or ""
     filename = os.path.basename(file_path)
     section = chunk.section_title or ""
-    parts = [jieba_segment(filename), jieba_segment(chunk.section_path or ""),
-             jieba_segment(section), jieba_segment(tag_str), jieba_segment(doc_type), jieba_segment(chunk.content)]
+    parts = [
+        jieba_segment(filename),
+        jieba_segment(chunk.section_path or ""),
+        jieba_segment(section),
+        jieba_segment(tag_str),
+        jieba_segment(doc_type),
+        jieba_segment(chunk.content),
+    ]
     return " ".join(filter(None, parts)).strip()
+
 
 def _json_serialize(obj):
     from datetime import date, datetime
+
     if isinstance(obj, (datetime, date)):
         return obj.isoformat()
     raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
 
 # =====================
 # Registry & Server
@@ -704,12 +854,15 @@ class ToolRegistry:
         self.tools: dict[str, BaseTool] = {}
         self.ctx = ctx
         self._plugin_tools_registered = False
+
     def register(self, cls):
         t = cls(self.ctx)
         self.tools[t.name] = t
+
     def list_tools(self):
         self._register_plugin_tools()
         return [t.to_mcp_tool() for t in self.tools.values()]
+
     async def execute(self, name: str, args: dict[str, Any]) -> list[TextContent]:
         self._register_plugin_tools()
         if name not in self.tools:
@@ -729,6 +882,7 @@ class ToolRegistry:
                     logger.info(f"✅ 已注册 {count} 个插件工具")
             except Exception as e:
                 logger.warning(f"⚠️ 注册插件工具失败: {e}")
+
 
 class RagServer:
     def __init__(self):
@@ -751,20 +905,33 @@ class RagServer:
 
     def _register(self):
         @self.server.list_tools()
-        async def list_tools(): return self.registry.list_tools()
+        async def list_tools():
+            return self.registry.list_tools()
+
         @self.server.call_tool()
         @mcp_safe
-        async def call_tool(name: str, arguments: dict[str, Any]): return await self.registry.execute(name, arguments)
+        async def call_tool(name: str, arguments: dict[str, Any]):
+            return await self.registry.execute(name, arguments)
+
         @self.server.list_resources()
-        async def list_resources(): return self.resource_manager.list_resources()
+        async def list_resources():
+            return self.resource_manager.list_resources()
+
         @self.server.list_resource_templates()
-        async def list_resource_templates(): return self.resource_manager.list_resource_templates()
+        async def list_resource_templates():
+            return self.resource_manager.list_resource_templates()
+
         @self.server.read_resource()
-        async def read_resource(uri): return await self.resource_manager.read_resource(uri)
+        async def read_resource(uri):
+            return await self.resource_manager.read_resource(uri)
+
         @self.server.list_prompts()
-        async def list_prompts(): return self.prompt_manager.list_prompts()
+        async def list_prompts():
+            return self.prompt_manager.list_prompts()
+
         @self.server.get_prompt()
-        async def get_prompt(name: str, arguments: dict[str, str]): return await self.prompt_manager.get_prompt(name, arguments)
+        async def get_prompt(name: str, arguments: dict[str, str]):
+            return await self.prompt_manager.get_prompt(name, arguments)
 
     async def run(self):
         if not MCP_AVAILABLE:
@@ -778,6 +945,7 @@ class RagServer:
             logger.info("Received interrupt signal")
         finally:
             await self.ctx.shutdown()
+
 
 if __name__ == "__main__":
     asyncio.run(RagServer().run())

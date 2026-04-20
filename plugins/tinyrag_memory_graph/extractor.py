@@ -4,11 +4,14 @@ extractor.py - 双层实体/关系抽取管道
 
 实现文档级（Frontmatter/Wikilinks）和 Chunk 级（NLP/LLM）的实体/关系抽取。
 """
+
 import hashlib
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass, field
+
+from loguru import logger
 
 from plugins.tinyrag_memory_graph.config import ExtractionConfig, MemoryGraphConfig
 from plugins.tinyrag_memory_graph.models import Entity, EntityType, Relation, RelationType
@@ -17,6 +20,7 @@ from plugins.tinyrag_memory_graph.models import Entity, EntityType, Relation, Re
 @dataclass
 class ExtractionResult:
     """抽取结果"""
+
     entities: list[Entity] = field(default_factory=list)
     relations: list[Relation] = field(default_factory=list)
     wikilinks: list[str] = field(default_factory=list)
@@ -40,10 +44,7 @@ class FrontmatterParser:
     """
 
     # YAML Frontmatter 边界正则
-    FRONTMATTER_PATTERN = re.compile(
-        r'^---\s*\n(.*?)\n---\s*\n',
-        re.DOTALL | re.MULTILINE
-    )
+    FRONTMATTER_PATTERN = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL | re.MULTILINE)
 
     @classmethod
     def parse(cls, content: str) -> dict:
@@ -55,6 +56,7 @@ class FrontmatterParser:
         yaml_content = match.group(1)
         try:
             import yaml
+
             return yaml.safe_load(yaml_content) or {}
         except Exception:
             # 简单解析作为后备
@@ -64,16 +66,16 @@ class FrontmatterParser:
     def _simple_parse(cls, yaml_content: str) -> dict:
         """简单 YAML 解析（处理常见格式）"""
         result = {}
-        for line in yaml_content.split('\n'):
-            if ':' not in line:
+        for line in yaml_content.split("\n"):
+            if ":" not in line:
                 continue
-            key, _, value = line.partition(':')
+            key, _, value = line.partition(":")
             key = key.strip()
             value = value.strip()
 
             # 处理列表值
-            if value.startswith('[') and value.endswith(']'):
-                value = [v.strip() for v in value[1:-1].split(',') if v.strip()]
+            if value.startswith("[") and value.endswith("]"):
+                value = [v.strip() for v in value[1:-1].split(",") if v.strip()]
             elif value.startswith('"') and value.endswith('"'):
                 value = value[1:-1]
             elif value.startswith("'") and value.endswith("'"):
@@ -104,7 +106,7 @@ class FrontmatterParser:
         if isinstance(value, list):
             return value
         if isinstance(value, str):
-            return [v.strip() for v in value.split(',') if v.strip()]
+            return [v.strip() for v in value.split(",") if v.strip()]
         return []
 
 
@@ -120,10 +122,7 @@ class WikilinkExtractor:
     """
 
     # Wikilink 正则模式
-    WIKILINK_PATTERN = re.compile(
-        r'\[\[([^\]|#]+)(?:[#|]([^\]]*))?\]\]',
-        re.MULTILINE
-    )
+    WIKILINK_PATTERN = re.compile(r"\[\[([^\]|#]+)(?:[#|]([^\]]*))?\]\]", re.MULTILINE)
 
     @classmethod
     def extract(cls, content: str) -> list[str]:
@@ -142,12 +141,14 @@ class WikilinkExtractor:
         for match in cls.WIKILINK_PATTERN.finditer(content):
             target = match.group(1).strip()
             if target:
-                results.append({
-                    "target": target,
-                    "start": match.start(),
-                    "end": match.end(),
-                    "heading": match.group(2).strip() if match.group(2) else None,
-                })
+                results.append(
+                    {
+                        "target": target,
+                        "start": match.start(),
+                        "end": match.end(),
+                        "heading": match.group(2).strip() if match.group(2) else None,
+                    }
+                )
         return results
 
 
@@ -170,6 +171,7 @@ class NLPExtractor:
 
         try:
             import spacy
+
             model_name = self.config.spacy_model
 
             # 尝试加载模型
@@ -178,12 +180,13 @@ class NLPExtractor:
             except OSError:
                 # 尝试下载模型
                 from spacy.cli import download
+
                 download(model_name)
                 self._nlp = spacy.load(model_name)
 
             self._initialized = True
         except Exception as e:
-            print(f"[NLPExtractor] Failed to load spaCy model: {e}")
+            logger.info(f"[NLPExtractor] Failed to load spaCy model: {e}")
             self._nlp = None
             self._initialized = True
 
@@ -212,11 +215,11 @@ class NLPExtractor:
                     canonical_name=ent.text.strip(),
                     type=self._map_entity_type(ent.label_),
                     confidence=min(1.0, confidence),
-                    source="spacy"
+                    source="spacy",
                 )
                 entities.append(entity)
         except Exception as e:
-            print(f"[NLPExtractor] Error extracting entities: {e}")
+            logger.info(f"[NLPExtractor] Error extracting entities: {e}")
 
         return self._deduplicate_entities(entities)
 
@@ -262,15 +265,15 @@ class RuleExtractor:
     # 默认规则词典
     DEFAULT_PATTERNS = {
         # 项目模式
-        r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\s+项目)\b': EntityType.PROJECT,
+        r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\s+项目)\b": EntityType.PROJECT,
         # 技术术语
-        r'\b([A-Z]{2,}|(?:Python|Java|JavaScript|TypeScript|Rust|Go|React|Vue|Node\.js))\b': EntityType.TECHNOLOGY,
+        r"\b([A-Z]{2,}|(?:Python|Java|JavaScript|TypeScript|Rust|Go|React|Vue|Node\.js))\b": EntityType.TECHNOLOGY,
         # 版本号
-        r'\b(v?\d+\.\d+(?:\.\d+)?)\b': EntityType.CONCEPT,
+        r"\b(v?\d+\.\d+(?:\.\d+)?)\b": EntityType.CONCEPT,
         # 邮箱
-        r'\b([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})\b': EntityType.PERSON,
+        r"\b([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})\b": EntityType.PERSON,
         # URL
-        r'(https?://[^\s]+)': EntityType.CONCEPT,
+        r"(https?://[^\s]+)": EntityType.CONCEPT,
     }
 
     def __init__(self, config: ExtractionConfig):
@@ -283,12 +286,13 @@ class RuleExtractor:
         if self.config.rule_dict_path:
             try:
                 import json
+
                 with open(self.config.rule_dict_path, encoding="utf-8") as f:
                     custom = json.load(f)
                     for pattern, entity_type in custom.get("patterns", {}).items():
                         self.patterns[pattern] = entity_type
             except Exception as e:
-                print(f"[RuleExtractor] Failed to load custom dict: {e}")
+                logger.info(f"[RuleExtractor] Failed to load custom dict: {e}")
 
     def extract_entities(self, text: str) -> list[Entity]:
         """从文本中抽取实体"""
@@ -303,7 +307,7 @@ class RuleExtractor:
                         canonical_name=name.strip(),
                         type=entity_type,
                         confidence=1.0,  # 规则匹配置信度高
-                        source="rule"
+                        source="rule",
                     )
                     entities.append(entity)
             except Exception:
@@ -336,16 +340,12 @@ class LLMExtractor:
         # 检查是否有可用的 LLM
         try:
             import llama_cpp
+
             if self._llm is None:
                 # 尝试加载量化模型
                 model_path = self._find_llm_model()
                 if model_path:
-                    self._llm = llama_cpp.Llama(
-                        model_path=str(model_path),
-                        n_ctx=2048,
-                        n_threads=4,
-                        verbose=False
-                    )
+                    self._llm = llama_cpp.Llama(model_path=str(model_path), n_ctx=2048, n_threads=4, verbose=False)
         except ImportError:
             return [], []
 
@@ -372,45 +372,44 @@ JSON:"""
 
             # 仅在 Unix 系统上使用 signal
             import os
-            if hasattr(signal, 'SIGALRM'):
+
+            if hasattr(signal, "SIGALRM"):
                 signal.signal(signal.SIGALRM, timeout_handler)
                 signal.alarm(self.config.llm_max_latency_ms // 1000 + 1)
 
             try:
-                response = self._llm(
-                    prompt,
-                    max_tokens=512,
-                    temperature=0.1,
-                    stop=["}"]
-                )
+                response = self._llm(prompt, max_tokens=512, temperature=0.1, stop=["}"])
             finally:
-                if hasattr(signal, 'SIGALRM'):
+                if hasattr(signal, "SIGALRM"):
                     signal.alarm(0)
 
             # 解析响应
-            text_response = response['choices'][0]['text']
+            text_response = response["choices"][0]["text"]
             json_str = text_response + "}"  # 补全 JSON
 
             # 尝试找到 JSON 部分
             import json
-            start = json_str.find('{')
+
+            start = json_str.find("{")
             if start >= 0:
                 data = json.loads(json_str[start:])
 
                 entities = []
                 for e in data.get("entities", []):
-                    entities.append(Entity(
-                        id=hashlib.md5(f"{e['type']}:{e['name']}".encode()).hexdigest()[:16],
-                        canonical_name=e["name"],
-                        type=e.get("type", "UNKNOWN"),
-                        confidence=0.7,
-                        source="llm"
-                    ))
+                    entities.append(
+                        Entity(
+                            id=hashlib.md5(f"{e['type']}:{e['name']}".encode()).hexdigest()[:16],
+                            canonical_name=e["name"],
+                            type=e.get("type", "UNKNOWN"),
+                            confidence=0.7,
+                            source="llm",
+                        )
+                    )
 
                 return entities, []  # 关系抽取需要更复杂的处理
 
         except (TimeoutError, json.JSONDecodeError, Exception) as e:
-            print(f"[LLMExtractor] Error: {e}")
+            logger.info(f"[LLMExtractor] Error: {e}")
 
         return [], []
 
@@ -423,6 +422,7 @@ JSON:"""
         ]
 
         from pathlib import Path
+
         for pattern in candidates:
             expanded = Path(pattern).expanduser()
             if expanded.exists():
@@ -449,13 +449,18 @@ class DualLayerExtractor:
         self.extraction_config = config.extraction
 
         # 初始化抽取器
-        self.nlp_extractor = NLPExtractor(self.extraction_config) if self.extraction_config.chunk_mode == "spacy" else None
+        self.nlp_extractor = (
+            NLPExtractor(self.extraction_config) if self.extraction_config.chunk_mode == "spacy" else None
+        )
         self.rule_extractor = RuleExtractor(self.extraction_config)
-        self.llm_extractor = LLMExtractor(self.extraction_config) if self.extraction_config.chunk_mode == "llm_fallback" else None
+        self.llm_extractor = (
+            LLMExtractor(self.extraction_config) if self.extraction_config.chunk_mode == "llm_fallback" else None
+        )
 
     def _ensure_json_serializable(self, data: dict) -> dict:
         """确保数据可 JSON 序列化"""
         import datetime
+
         result = {}
         for k, v in data.items():
             if isinstance(v, (datetime.date, datetime.datetime)):
@@ -464,8 +469,7 @@ class DualLayerExtractor:
                 result[k] = self._ensure_json_serializable(v)
             elif isinstance(v, list):
                 result[k] = [
-                    item.isoformat() if isinstance(item, (datetime.date, datetime.datetime)) else item
-                    for item in v
+                    item.isoformat() if isinstance(item, (datetime.date, datetime.datetime)) else item for item in v
                 ]
             else:
                 result[k] = v
@@ -483,9 +487,7 @@ class DualLayerExtractor:
 
         # 1. 解析 Frontmatter
         frontmatter = FrontmatterParser.parse(content)
-        result.frontmatter = self._ensure_json_serializable(
-            FrontmatterParser.extract_frontmatter_fields(frontmatter)
-        )
+        result.frontmatter = self._ensure_json_serializable(FrontmatterParser.extract_frontmatter_fields(frontmatter))
 
         # 2. 提取 Wikilinks
         wikilinks = WikilinkExtractor.extract(content)
@@ -493,44 +495,50 @@ class DualLayerExtractor:
 
         # 3. 从 Frontmatter 创建实体
         if result.frontmatter.get("author"):
-            result.entities.append(Entity(
-                id=hashlib.md5(f"person:{result.frontmatter['author']}".encode()).hexdigest()[:16],
-                canonical_name=result.frontmatter["author"],
-                type=EntityType.PERSON,
-                confidence=1.0,
-                source="frontmatter"
-            ))
+            result.entities.append(
+                Entity(
+                    id=hashlib.md5(f"person:{result.frontmatter['author']}".encode()).hexdigest()[:16],
+                    canonical_name=result.frontmatter["author"],
+                    type=EntityType.PERSON,
+                    confidence=1.0,
+                    source="frontmatter",
+                )
+            )
 
         if result.frontmatter.get("project"):
-            result.entities.append(Entity(
-                id=hashlib.md5(f"project:{result.frontmatter['project']}".encode()).hexdigest()[:16],
-                canonical_name=result.frontmatter["project"],
-                type=EntityType.PROJECT,
-                confidence=1.0,
-                source="frontmatter"
-            ))
+            result.entities.append(
+                Entity(
+                    id=hashlib.md5(f"project:{result.frontmatter['project']}".encode()).hexdigest()[:16],
+                    canonical_name=result.frontmatter["project"],
+                    type=EntityType.PROJECT,
+                    confidence=1.0,
+                    source="frontmatter",
+                )
+            )
 
         # 4. 为标签创建实体
         for tag in result.frontmatter.get("tags", []):
-            result.entities.append(Entity(
-                id=hashlib.md5(f"tag:{tag}".encode()).hexdigest()[:16],
-                canonical_name=tag,
-                type=EntityType.CONCEPT,
-                confidence=1.0,
-                source="frontmatter"
-            ))
+            result.entities.append(
+                Entity(
+                    id=hashlib.md5(f"tag:{tag}".encode()).hexdigest()[:16],
+                    canonical_name=tag,
+                    type=EntityType.CONCEPT,
+                    confidence=1.0,
+                    source="frontmatter",
+                )
+            )
 
         result.processing_time_ms = (time.time() - start_time) * 1000
         return result
 
-    def extract_chunk_level(self, chunk_content: str, chunk_id: int,
-                            note_id: str) -> ExtractionResult:
+    def extract_chunk_level(self, chunk_content: str, chunk_id: int, note_id: str) -> ExtractionResult:
         """
         Chunk 级抽取（FR-1.3）
 
         使用 spacy + 规则词典，可选 LLM 后备。
         """
         import sys
+
         start_time = time.time()
         result = ExtractionResult(source="chunk_level")
 
@@ -542,18 +550,14 @@ class DualLayerExtractor:
         if self.nlp_extractor:
             try:
                 # 检查解释器是否正在关闭
-                if hasattr(sys, 'flags') and sys.flags is None:
+                if hasattr(sys, "flags") and sys.flags is None:
                     # 解释器正在关闭，跳过 NLP 抽取
                     pass
                 else:
                     with ThreadPoolExecutor(max_workers=1) as executor:
-                        future = executor.submit(
-                            self.nlp_extractor.extract_entities, chunk_content
-                        )
+                        future = executor.submit(self.nlp_extractor.extract_entities, chunk_content)
                         try:
-                            nlp_entities = future.result(
-                                timeout=self.extraction_config.chunk_timeout_ms / 1000
-                            )
+                            nlp_entities = future.result(timeout=self.extraction_config.chunk_timeout_ms / 1000)
                             result.entities.extend(nlp_entities)
                         except FuturesTimeoutError:
                             pass
@@ -562,16 +566,15 @@ class DualLayerExtractor:
                 if "interpreter shutdown" in str(e):
                     pass
                 else:
-                    print(f"[DualLayerExtractor] NLP extraction error: {e}")
+                    logger.info(f"[DualLayerExtractor] NLP extraction error: {e}")
             except Exception as e:
-                print(f"[DualLayerExtractor] NLP extraction error: {e}")
+                logger.info(f"[DualLayerExtractor] NLP extraction error: {e}")
 
         # 3. 去重
         result.entities = self._deduplicate_entities(result.entities)
 
         # 4. LLM 后备（如果配置且召回不足）
-        if (self.llm_extractor and
-            len(result.entities) < self.extraction_config.llm_fallback_threshold):
+        if self.llm_extractor and len(result.entities) < self.extraction_config.llm_fallback_threshold:
             try:
                 llm_entities, _ = self.llm_extractor.extract_entities(chunk_content)
                 result.entities.extend(llm_entities)
@@ -581,9 +584,9 @@ class DualLayerExtractor:
         result.processing_time_ms = (time.time() - start_time) * 1000
         return result
 
-    def create_relations_from_wikilinks(self, src_chunk_id: int,
-                                        wikilinks: list[str],
-                                        chunk_map: dict[str, int]) -> list[Relation]:
+    def create_relations_from_wikilinks(
+        self, src_chunk_id: int, wikilinks: list[str], chunk_map: dict[str, int]
+    ) -> list[Relation]:
         """
         从 Wikilink 创建关系（FR-1.4 双层映射）
 

@@ -8,9 +8,12 @@ hybrid_retriever.py - 混合检索增强引擎
 - RRF 融合重排
 - 上下文组装
 """
+
 import sqlite3
 import time
 from dataclasses import dataclass
+
+from loguru import logger
 
 from plugins.tinyrag_memory_graph.config import MemoryGraphConfig, RetrievalConfig
 from plugins.tinyrag_memory_graph.storage import GraphStorage
@@ -19,6 +22,7 @@ from plugins.tinyrag_memory_graph.storage import GraphStorage
 @dataclass
 class HybridSearchResult:
     """混合检索结果 - 统一评分版"""
+
     chunk_id: int
     content: str
     file_path: str
@@ -26,18 +30,18 @@ class HybridSearchResult:
     section: str
 
     # 基础检索分数（来自 HybridEngine）
-    semantic_score: float = 0.0      # 向量语义分数
-    keyword_score: float = 0.0       # FTS5 关键词分数
-    confidence_score: float = 1.0    # 置信度分数
-    base_final_score: float = 0.0    # 基础检索最终分数
+    semantic_score: float = 0.0  # 向量语义分数
+    keyword_score: float = 0.0  # FTS5 关键词分数
+    confidence_score: float = 1.0  # 置信度分数
+    base_final_score: float = 0.0  # 基础检索最终分数
 
     # 图谱增强分数
-    graph_score: float = 0.0         # 图谱关联分数
-    preference_score: float = 0.0    # 偏好匹配分数
-    final_score: float = 0.0         # 综合最终分数
+    graph_score: float = 0.0  # 图谱关联分数
+    preference_score: float = 0.0  # 偏好匹配分数
+    final_score: float = 0.0  # 综合最终分数
 
     # 兼容旧字段
-    vector_score: float = 0.0        # 等同于 semantic_score
+    vector_score: float = 0.0  # 等同于 semantic_score
 
     # 图谱信息
     hop_distance: int = 0
@@ -65,9 +69,7 @@ class HybridRetriever:
     协调向量召回和图扩展，实现知识图谱增强的检索。
     """
 
-    def __init__(self, db_conn: sqlite3.Connection,
-                 config: MemoryGraphConfig,
-                 base_retriever=None):
+    def __init__(self, db_conn: sqlite3.Connection, config: MemoryGraphConfig, base_retriever=None):
         """
         初始化混合检索器
 
@@ -90,13 +92,17 @@ class HybridRetriever:
             "graph_nodes_traversed": [],
         }
 
-    def search(self, query: str, query_vec: list[float],
-               top_k: int = 10,
-               alpha: float | None = None,
-               beta: float | None = None,
-               gamma: float | None = None,
-               user_preferences: dict | None = None,
-               base_results: list[dict] | None = None) -> list[HybridSearchResult]:
+    def search(
+        self,
+        query: str,
+        query_vec: list[float],
+        top_k: int = 10,
+        alpha: float | None = None,
+        beta: float | None = None,
+        gamma: float | None = None,
+        user_preferences: dict | None = None,
+        base_results: list[dict] | None = None,
+    ) -> list[HybridSearchResult]:
         """
         执行混合检索（FR-2）
 
@@ -113,6 +119,7 @@ class HybridRetriever:
         Returns:
             混合检索结果列表
         """
+        logger.info(f"[HybridRetriever] search called, query={query}, top_k={top_k}")
         start_time = time.time()
 
         # 使用配置默认值
@@ -129,6 +136,7 @@ class HybridRetriever:
             vector_results = self._vector_recall(query_vec)
             vector_latency = (time.time() - start_time) * 1000
         self._metrics["vector_latency_ms"].append(vector_latency)
+        logger.info(f"[HybridRetriever] vector_results count={len(vector_results)}")
 
         if not vector_results:
             return []
@@ -136,7 +144,14 @@ class HybridRetriever:
         # 2. 图扩展遍历（FR-2.2）
         graph_start = time.time()
         seed_chunk_ids = [r["chunk_id"] for r in vector_results[:3]]  # Top 3 作为种子
+        logger.info(f"[Graph] 种子 Chunk IDs: {seed_chunk_ids}")
         graph_results = self._graph_traverse(seed_chunk_ids)
+        logger.info(f"[Graph] 图谱遍历结果数量: {len(graph_results)}")
+
+        # 2.5. scope='doc' 扩展（补丁2）
+        graph_results = self._expand_doc_scope_candidates(graph_results, query_vec)
+        logger.info(f"[Graph] 扩展后结果数量: {len(graph_results)}")
+
         graph_latency = (time.time() - graph_start) * 1000
         self._metrics["graph_latency_ms"].append(graph_latency)
         self._metrics["graph_nodes_traversed"].append(len(graph_results))
@@ -146,11 +161,7 @@ class HybridRetriever:
 
         # 4. RRF 融合重排（FR-2.3）
         ranked_results = self._rrf_fusion(
-            all_candidates,
-            vector_results,
-            graph_results,
-            alpha, beta, gamma,
-            user_preferences
+            all_candidates, vector_results, graph_results, alpha, beta, gamma, user_preferences
         )
 
         # 5. 填充内容（FR-2.4）
@@ -194,16 +205,18 @@ class HybridRetriever:
                 content = getattr(r, "content", "")
                 file_path = getattr(r, "file_path", "")
 
-            converted.append({
-                "chunk_id": chunk_id,
-                "score": semantic_score,  # 向量分数
-                "semantic_score": semantic_score,
-                "keyword_score": keyword_score,
-                "confidence_score": confidence_score,
-                "base_final_score": final_score,  # 保留基础检索的最终分数
-                "content": content,
-                "file_path": file_path,
-            })
+            converted.append(
+                {
+                    "chunk_id": chunk_id,
+                    "score": semantic_score,  # 向量分数
+                    "semantic_score": semantic_score,
+                    "keyword_score": keyword_score,
+                    "confidence_score": confidence_score,
+                    "base_final_score": final_score,  # 保留基础检索的最终分数
+                    "content": content,
+                    "file_path": file_path,
+                }
+            )
         return converted
 
     def _vector_recall(self, query_vec: list[float]) -> list[dict]:
@@ -217,6 +230,7 @@ class HybridRetriever:
 
         try:
             import array
+
             query_blob = array.array("f", query_vec).tobytes()
 
             # 使用 sqlite-vec 的 vec_distance_L2 函数
@@ -229,7 +243,7 @@ class HybridRetriever:
                    WHERE c.is_deleted = 0
                    ORDER BY distance
                    LIMIT {self.retrieval_config.vector_top_k}""",
-                (query_blob,)
+                (query_blob,),
             )
 
             results = []
@@ -237,16 +251,18 @@ class HybridRetriever:
                 # L2 距离转相似度
                 distance = row[1]
                 similarity = 1.0 / (1.0 + distance)
-                results.append({
-                    "chunk_id": row[0],
-                    "score": similarity,
-                    "content": row[2],
-                    "file_path": row[3],
-                })
+                results.append(
+                    {
+                        "chunk_id": row[0],
+                        "score": similarity,
+                        "content": row[2],
+                        "file_path": row[3],
+                    }
+                )
             return results
 
         except Exception as e:
-            print(f"[HybridRetriever] Vector recall error: {e}")
+            logger.info(f"[HybridRetriever] Vector recall error: {e}")
             return []
 
     def _graph_traverse(self, seed_chunk_ids: list[int]) -> list[dict]:
@@ -268,17 +284,106 @@ class HybridRetriever:
         # 转换为标准格式
         results = []
         for r in graph_results:
-            results.append({
-                "chunk_id": r["chunk_id"],
-                "hop": r["hop"],
-                "path_weight": r["path_weight"],
-                "path": r["path"],
-            })
+            results.append(
+                {
+                    "chunk_id": r["chunk_id"],
+                    "hop": r["hop"],
+                    "path_weight": r["path_weight"],
+                    "path": r["path"],
+                }
+            )
 
         return results
 
-    def _merge_candidates(self, vector_results: list[dict],
-                         graph_results: list[dict]) -> dict[int, dict]:
+    def _expand_doc_scope_candidates(self, graph_cands: list[dict], query_vec: list[float]) -> list[dict]:
+        """
+        当 scope='doc' 时，扩展召回目标文档下的相关 Chunks
+
+        Args:
+            graph_cands: 图谱遍历结果
+            query_vec: 查询向量
+
+        Returns:
+            扩展后的候选列表
+        """
+        expanded = []
+        seen_chunk_ids = set()
+
+        for cand in graph_cands:
+            if cand.get("scope") == "doc":
+                # 获取目标文档 ID
+                note_id = self.storage.get_note_id_by_chunk(cand["chunk_id"])
+                if not note_id:
+                    expanded.append(cand)
+                    logger.warning(f"[Graph] 无法获取 chunk_id={cand['chunk_id']} 的 note_id")
+                    continue
+
+                # 获取该文档的所有 Chunk
+                doc_chunks = self.storage.get_chunks_by_note(note_id)
+                if not doc_chunks:
+                    expanded.append(cand)
+                    continue
+
+                # 计算每个 Chunk 与查询的相似度
+                scored_chunks = []
+                for chunk in doc_chunks:
+                    if chunk["id"] in seen_chunk_ids:
+                        continue
+
+                    # 计算余弦相似度
+                    similarity = self._cosine_similarity(query_vec, chunk["embedding"])
+                    scored_chunks.append((chunk, similarity))
+
+                # 按相似度排序，取 Top-K
+                scored_chunks.sort(key=lambda x: x[1], reverse=True)
+                top_k = getattr(self.retrieval_config, "doc_expand_top_k", 3)
+                top_k_chunks = scored_chunks[:top_k]
+
+                # 添加到结果
+                for chunk, similarity in top_k_chunks:
+                    expanded.append(
+                        {
+                            "chunk_id": chunk["id"],
+                            "hop": cand.get("hop", 0),
+                            "path_weight": cand.get("path_weight", 0.0),
+                            "path": cand.get("path", ""),
+                            "scope": "doc_expanded",
+                            "evidence_scope": "doc",
+                            "semantic_score": similarity,
+                        }
+                    )
+                    seen_chunk_ids.add(chunk["id"])
+            else:
+                expanded.append(cand)
+
+        return expanded
+
+    def _cosine_similarity(self, vec1: list[float], vec2: list[float]) -> float:
+        """
+        计算余弦相似度
+
+        Args:
+            vec1: 向量1
+            vec2: 向量2
+
+        Returns:
+            余弦相似度 (0-1)
+        """
+        import numpy as np
+
+        v1 = np.array(vec1)
+        v2 = np.array(vec2)
+
+        # 避免除零
+        norm1 = np.linalg.norm(v1)
+        norm2 = np.linalg.norm(v2)
+
+        if norm1 == 0 or norm2 == 0:
+            return 0.0
+
+        return float(np.dot(v1, v2) / (norm1 * norm2))
+
+    def _merge_candidates(self, vector_results: list[dict], graph_results: list[dict]) -> dict[int, dict]:
         """合并向量和图搜索结果"""
         candidates = {}
 
@@ -320,11 +425,16 @@ class HybridRetriever:
 
         return candidates
 
-    def _rrf_fusion(self, candidates: dict[int, dict],
-                    vector_results: list[dict],
-                    graph_results: list[dict],
-                    alpha: float, beta: float, gamma: float,
-                    user_preferences: dict | None = None) -> list[dict]:
+    def _rrf_fusion(
+        self,
+        candidates: dict[int, dict],
+        vector_results: list[dict],
+        graph_results: list[dict],
+        alpha: float,
+        beta: float,
+        gamma: float,
+        user_preferences: dict | None = None,
+    ) -> list[dict]:
         """
         RRF 融合重排（FR-2.3）- 统一评分版
 
@@ -356,8 +466,7 @@ class HybridRetriever:
             # 获取基础检索分数（优先使用保留的基础分数）
             # 后备链：base_final_score -> final_score -> 0.0
             # 修复：移除 vector_score 作为后备，确保语义分数正确
-            base_final_score = cand.get("base_final_score", 
-                            cand.get("final_score", 0.0))
+            base_final_score = cand.get("base_final_score", cand.get("final_score", 0.0))
             # 修复：直接获取 semantic_score，不使用 vector_score 作为后备
             # 这样确保 keyword 模式下语义分数正确显示为 0
             semantic_score = cand.get("semantic_score", 0.0)
@@ -382,39 +491,38 @@ class HybridRetriever:
             # 这样保证评分标准与基础检索一致，图谱只做正向增强
             final_score = alpha * base_final_score + beta * g_score + gamma * p_score
 
-            ranked.append({
-                **cand,
-                "final_score": final_score,
-                "preference_score": p_score,
-                "graph_score": g_score,
-                # 保留原始分数供调试
-                "base_final_score": base_final_score,
-                "semantic_score": semantic_score,
-                "keyword_score": keyword_score,
-                "confidence_score": confidence_score,
-            })
+            ranked.append(
+                {
+                    **cand,
+                    "final_score": final_score,
+                    "preference_score": p_score,
+                    "graph_score": g_score,
+                    # 保留原始分数供调试
+                    "base_final_score": base_final_score,
+                    "semantic_score": semantic_score,
+                    "keyword_score": keyword_score,
+                    "confidence_score": confidence_score,
+                }
+            )
 
         # 按最终分数排序
         ranked.sort(key=lambda x: x["final_score"], reverse=True)
         return ranked
 
-    def _calculate_preference_match(self, chunk_id: int,
-                                     preferences: dict) -> float:
+    def _calculate_preference_match(self, chunk_id: int, preferences: dict) -> float:
         """计算用户偏好匹配分数"""
         if not preferences:
             return 0.0
 
         try:
             # 获取 Chunk 的继承元数据
-            row = self.db.execute(
-                "SELECT inherited_meta, note_id FROM chunks WHERE id = ?",
-                (chunk_id,)
-            ).fetchone()
+            row = self.db.execute("SELECT inherited_meta, note_id FROM chunks WHERE id = ?", (chunk_id,)).fetchone()
 
             if not row:
                 return 0.0
 
             import json
+
             inherited = json.loads(row[0] or "{}")
 
             score = 0.0
@@ -484,6 +592,7 @@ class HybridRetriever:
                 continue
 
             import json
+
             inherited = json.loads(row[3] or "{}") if row[3] else {}
 
             result = HybridSearchResult(
@@ -515,8 +624,7 @@ class HybridRetriever:
 
         return results
 
-    def assemble_context(self, results: list[HybridSearchResult],
-                         max_tokens: int | None = None) -> str:
+    def assemble_context(self, results: list[HybridSearchResult], max_tokens: int | None = None) -> str:
         """
         组装上下文（FR-2.4）
 
@@ -526,7 +634,7 @@ class HybridRetriever:
 
         # 估算 Token：中文约 1.5 字/token，英文约 4 字/token
         def estimate_tokens(text: str) -> int:
-            chinese_chars = sum(1 for c in text if '\u4e00' <= c <= '\u9fff')
+            chinese_chars = sum(1 for c in text if "\u4e00" <= c <= "\u9fff")
             other_chars = len(text) - chinese_chars
             return int(chinese_chars / 1.5 + other_chars / 4)
 
@@ -557,6 +665,7 @@ class HybridRetriever:
 
     def get_metrics(self) -> dict:
         """获取性能指标"""
+
         def avg(lst):
             return sum(lst) / len(lst) if lst else 0
 
@@ -579,9 +688,7 @@ class ContextAssembler:
     def __init__(self, config: RetrievalConfig):
         self.config = config
 
-    def assemble(self, results: list[HybridSearchResult],
-                 query: str,
-                 template: str | None = None) -> str:
+    def assemble(self, results: list[HybridSearchResult], query: str, template: str | None = None) -> str:
         """
         组装 LLM 提示上下文
 

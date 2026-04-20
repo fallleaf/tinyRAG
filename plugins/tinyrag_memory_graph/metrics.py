@@ -9,6 +9,7 @@ metrics.py - 监控埋点模块
 - LLM 抽取失败计数
 - CSV / Prometheus 导出
 """
+
 import csv
 import json
 import threading
@@ -21,6 +22,7 @@ from pathlib import Path
 @dataclass
 class MetricRecord:
     """单条指标记录"""
+
     timestamp: float
     metric_name: str
     value: float
@@ -34,9 +36,7 @@ class MetricsCollector:
     线程安全的指标收集和导出。
     """
 
-    def __init__(self, output_dir: str = "./metrics",
-                 export_format: str = "csv",
-                 sample_interval: int = 60):
+    def __init__(self, output_dir: str = "./metrics", export_format: str = "csv", sample_interval: int = 60):
         self.output_dir = Path(output_dir)
         self.export_format = export_format
         self.sample_interval = sample_interval
@@ -62,36 +62,42 @@ class MetricsCollector:
         with self._lock:
             key = self._make_key(name, labels)
             self._counters[key] += value
-            self._records.append(MetricRecord(
-                timestamp=time.time(),
-                metric_name=name,
-                value=value,
-                labels=labels or {},
-            ))
+            self._records.append(
+                MetricRecord(
+                    timestamp=time.time(),
+                    metric_name=name,
+                    value=value,
+                    labels=labels or {},
+                )
+            )
 
     def gauge(self, name: str, value: float, labels: dict | None = None):
         """仪表盘指标"""
         with self._lock:
             key = self._make_key(name, labels)
             self._gauges[key] = value
-            self._records.append(MetricRecord(
-                timestamp=time.time(),
-                metric_name=name,
-                value=value,
-                labels=labels or {},
-            ))
+            self._records.append(
+                MetricRecord(
+                    timestamp=time.time(),
+                    metric_name=name,
+                    value=value,
+                    labels=labels or {},
+                )
+            )
 
     def histogram(self, name: str, value: float, labels: dict | None = None):
         """直方图指标"""
         with self._lock:
             key = self._make_key(name, labels)
             self._histograms[key].append(value)
-            self._records.append(MetricRecord(
-                timestamp=time.time(),
-                metric_name=name,
-                value=value,
-                labels=labels or {},
-            ))
+            self._records.append(
+                MetricRecord(
+                    timestamp=time.time(),
+                    metric_name=name,
+                    value=value,
+                    labels=labels or {},
+                )
+            )
 
     def _make_key(self, name: str, labels: dict | None = None) -> str:
         """生成指标键"""
@@ -147,12 +153,14 @@ class MetricsCollector:
             writer.writerow(["timestamp", "metric_name", "value", "labels"])
 
             for record in self._records:
-                writer.writerow([
-                    record.timestamp,
-                    record.metric_name,
-                    record.value,
-                    json.dumps(record.labels),
-                ])
+                writer.writerow(
+                    [
+                        record.timestamp,
+                        record.metric_name,
+                        record.value,
+                        json.dumps(record.labels),
+                    ]
+                )
 
         return str(filepath)
 
@@ -179,8 +187,8 @@ class MetricsCollector:
                     count = len(sorted_values)
                     total = sum(sorted_values)
 
-                    lines.append(f'memory_graph_histogram_{key}_count {count}')
-                    lines.append(f'memory_graph_histogram_{key}_sum {total}')
+                    lines.append(f"memory_graph_histogram_{key}_count {count}")
+                    lines.append(f"memory_graph_histogram_{key}_sum {total}")
 
                     # 分位数
                     for q in [0.5, 0.9, 0.95, 0.99]:
@@ -196,8 +204,7 @@ class MetricsCollector:
             data = {
                 "counters": dict(self._counters),
                 "gauges": dict(self._gauges),
-                "histograms": {k: {"values": v, "count": len(v), "sum": sum(v)}
-                               for k, v in self._histograms.items()},
+                "histograms": {k: {"values": v, "count": len(v), "sum": sum(v)} for k, v in self._histograms.items()},
                 "records": [asdict(r) for r in self._records[-1000:]],  # 最近 1000 条
             }
         return json.dumps(data, indent=2)
@@ -252,9 +259,9 @@ def get_metrics_collector() -> MetricsCollector:
     return _global_collector
 
 
-def init_metrics(output_dir: str = "./metrics",
-                 export_format: str = "csv",
-                 sample_interval: int = 60) -> MetricsCollector:
+def init_metrics(
+    output_dir: str = "./metrics", export_format: str = "csv", sample_interval: int = 60
+) -> MetricsCollector:
     """初始化全局指标收集器"""
     global _global_collector
     _global_collector = MetricsCollector(

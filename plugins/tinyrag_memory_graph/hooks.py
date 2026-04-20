@@ -4,6 +4,7 @@ hooks.py - 钩子协议与上下文定义
 
 定义插件与 tinyRAG 核心之间的通信协议，实现零侵入式集成。
 """
+
 import sqlite3
 from dataclasses import dataclass, field
 from enum import Enum
@@ -11,11 +12,12 @@ from enum import Enum
 
 class HookType(Enum):
     """钩子类型枚举"""
-    ON_ADD_DOCUMENT = "on_add_document"      # 文档入库后触发
-    ON_SEARCH_AFTER = "on_search_after"      # 检索融合后触发
-    ON_RESPONSE = "on_response"              # LLM 输出后触发
+
+    ON_ADD_DOCUMENT = "on_add_document"  # 文档入库后触发
+    ON_SEARCH_AFTER = "on_search_after"  # 检索融合后触发
+    ON_RESPONSE = "on_response"  # LLM 输出后触发
     ON_DELETE_DOCUMENT = "on_delete_document"  # 文档删除后触发
-    ON_REBUILD_INDEX = "on_rebuild_index"    # 重建索引时触发
+    ON_REBUILD_INDEX = "on_rebuild_index"  # 重建索引时触发
 
 
 @dataclass
@@ -39,6 +41,7 @@ class HookContext:
         base_alpha: 基础检索的语义权重
         base_beta: 基础检索的关键词权重
     """
+
     # 检索相关
     query: str | None = None
     query_vec: list[float] | None = None
@@ -94,6 +97,7 @@ class HookResult:
         message: 结果消息
         metrics: 性能指标
     """
+
     success: bool = True
     modified: bool = False
     message: str = ""

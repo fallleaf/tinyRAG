@@ -45,16 +45,13 @@ def check_vacuum_needed(db: DatabaseManager, config) -> dict:
     # 检查图谱相关数据（与软删除 chunks/files 关联的）
     # 先检查表是否存在
     def _table_exists(conn, table_name):
-        cursor = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
-            (table_name,)
-        )
+        cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table_name,))
         return cursor.fetchone() is not None
 
-    relations_exist = _table_exists(db.conn, 'relations')
-    principles_exist = _table_exists(db.conn, 'principles')
-    notes_exist = _table_exists(db.conn, 'notes')
-    jobs_exist = _table_exists(db.conn, 'graph_build_jobs')
+    relations_exist = _table_exists(db.conn, "relations")
+    principles_exist = _table_exists(db.conn, "principles")
+    notes_exist = _table_exists(db.conn, "notes")
+    jobs_exist = _table_exists(db.conn, "graph_build_jobs")
 
     # 1. 与软删除 chunks 关联的 relations
     if relations_exist:
@@ -161,17 +158,14 @@ def clean_deleted_records(db: DatabaseManager, dry_run: bool = False) -> dict:
 
     # 检查表是否存在
     def _table_exists(conn, table_name):
-        cursor = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
-            (table_name,)
-        )
+        cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table_name,))
         return cursor.fetchone() is not None
 
-    relations_exist = _table_exists(db.conn, 'relations')
-    principles_exist = _table_exists(db.conn, 'principles')
-    notes_exist = _table_exists(db.conn, 'notes')
-    jobs_exist = _table_exists(db.conn, 'graph_build_jobs')
-    vectors_exist = _table_exists(db.conn, 'vectors')
+    relations_exist = _table_exists(db.conn, "relations")
+    principles_exist = _table_exists(db.conn, "principles")
+    notes_exist = _table_exists(db.conn, "notes")
+    jobs_exist = _table_exists(db.conn, "graph_build_jobs")
+    vectors_exist = _table_exists(db.conn, "vectors")
 
     if dry_run:
         # 仅统计，不删除
@@ -304,26 +298,25 @@ def clean_deleted_records(db: DatabaseManager, dry_run: bool = False) -> dict:
 
         # 汇总统计
         total_deleted = (
-            stats["chunks_deleted"] +
-            stats["files_deleted"] +
-            stats["relations_deleted"] +
-            stats["principles_deleted"] +
-            stats["notes_deleted"] +
-            stats["jobs_deleted"]
+            stats["chunks_deleted"]
+            + stats["files_deleted"]
+            + stats["relations_deleted"]
+            + stats["principles_deleted"]
+            + stats["notes_deleted"]
+            + stats["jobs_deleted"]
         )
         logger.success(f"  ✅ 软删除记录清理完成，共删除 {total_deleted} 条记录")
 
         # 输出图谱清理详情
         graph_deleted = (
-            stats["relations_deleted"] +
-            stats["principles_deleted"] +
-            stats["notes_deleted"] +
-            stats["jobs_deleted"]
+            stats["relations_deleted"] + stats["principles_deleted"] + stats["notes_deleted"] + stats["jobs_deleted"]
         )
         if graph_deleted > 0:
-            logger.info(f"  📊 图谱相关：relations={stats['relations_deleted']}, "
-                       f"principles={stats['principles_deleted']}, "
-                       f"notes={stats['notes_deleted']}, jobs={stats['jobs_deleted']}")
+            logger.info(
+                f"  📊 图谱相关：relations={stats['relations_deleted']}, "
+                f"principles={stats['principles_deleted']}, "
+                f"notes={stats['notes_deleted']}, jobs={stats['jobs_deleted']}"
+            )
 
         return stats
 
@@ -382,10 +375,10 @@ def main():
 
     # 显示图谱相关统计
     graph_total = (
-        stats['relations_to_delete'] +
-        stats['principles_to_delete'] +
-        stats['notes_to_delete'] +
-        stats['jobs_to_delete']
+        stats["relations_to_delete"]
+        + stats["principles_to_delete"]
+        + stats["notes_to_delete"]
+        + stats["jobs_to_delete"]
     )
     if graph_total > 0:
         logger.info("📊 图谱关联数据待清理:")
@@ -397,19 +390,21 @@ def main():
     if stats["max_ratio"] > 20 or args.force:
         if args.dry_run:
             logger.info("💡 建议执行清理和 VACUUM (软删除比例 > 20%)")
-            logger.info(f" 预计清理：{stats['chunks_deleted']} chunks + {stats['files_deleted']} files + {graph_total} 图谱记录")
+            logger.info(
+                f" 预计清理：{stats['chunks_deleted']} chunks + {stats['files_deleted']} files + {graph_total} 图谱记录"
+            )
         else:
             # 1. 先清理软删除记录
             if not args.vacuum_only:
                 logger.info("\n🧹 步骤 1: 清理软删除记录（含图谱数据）...")
                 clean_stats = clean_deleted_records(db, dry_run=False)
                 total = (
-                    clean_stats['chunks_deleted'] +
-                    clean_stats['files_deleted'] +
-                    clean_stats.get('relations_deleted', 0) +
-                    clean_stats.get('principles_deleted', 0) +
-                    clean_stats.get('notes_deleted', 0) +
-                    clean_stats.get('jobs_deleted', 0)
+                    clean_stats["chunks_deleted"]
+                    + clean_stats["files_deleted"]
+                    + clean_stats.get("relations_deleted", 0)
+                    + clean_stats.get("principles_deleted", 0)
+                    + clean_stats.get("notes_deleted", 0)
+                    + clean_stats.get("jobs_deleted", 0)
                 )
                 logger.info(f" 共删除 {total} 条记录")
 

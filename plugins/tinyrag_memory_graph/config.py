@@ -4,6 +4,7 @@ config.py - 插件配置定义
 
 定义 Memory Graph 插件的所有可配置项，支持 YAML 配置文件加载。
 """
+
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -14,6 +15,7 @@ import yaml
 @dataclass
 class ExtractionConfig:
     """实体/关系抽取配置"""
+
     # Chunk 级抽取模式: spacy / rule / llm_fallback
     chunk_mode: Literal["spacy", "rule", "llm_fallback"] = "spacy"
     # LLM 超时熔断阈值 (ms)
@@ -31,6 +33,7 @@ class ExtractionConfig:
 @dataclass
 class RetrievalConfig:
     """混合检索配置 - 统一评分版"""
+
     # 向量召回数量
     vector_top_k: int = 20
     # 图扩展最大跳数
@@ -40,9 +43,9 @@ class RetrievalConfig:
     # 图遍历最大节点数
     max_traverse_nodes: int = 50
     # RRF 融合参数
-    alpha: float = 1.0   # 基础分数保留系数（默认完全保留）
-    beta: float = 0.15   # 图谱增强权重
-    gamma: float = 0.1   # 偏好加成权重
+    alpha: float = 1.0  # 基础分数保留系数（默认完全保留）
+    beta: float = 0.15  # 图谱增强权重
+    gamma: float = 0.1  # 偏好加成权重
     # 上下文 Token 预算
     max_context_tokens: int = 3500
 
@@ -50,6 +53,7 @@ class RetrievalConfig:
 @dataclass
 class MemifyConfig:
     """记忆代谢配置"""
+
     # 代谢触发间隔 (秒)
     interval_sec: int = 1800
     # 权重衰减：超过 N 天未访问
@@ -69,6 +73,7 @@ class MemifyConfig:
 @dataclass
 class QueueConfig:
     """异步队列配置"""
+
     # 最大工作线程数
     max_workers: int = 2
     # 队列最大容量
@@ -82,6 +87,7 @@ class QueueConfig:
 @dataclass
 class MetricsConfig:
     """监控埋点配置"""
+
     # 是否启用监控
     enabled: bool = True
     # 指标输出目录
@@ -99,6 +105,7 @@ class MemoryGraphConfig:
 
     支持从 YAML 字典或文件加载。
     """
+
     # 全局开关
     enabled: bool = True
     # 插件名称
@@ -164,10 +171,10 @@ class MemoryGraphConfig:
                 max_hops=retrieval_data.get("max_hops", 2),
                 min_edge_weight=retrieval_data.get("min_edge_weight", 0.4),
                 max_traverse_nodes=retrieval_data.get("max_traverse_nodes", 50),
-            # 修复问题2：兼容 config.yaml 的 vector_weight/graph_weight 命名
-            alpha=retrieval_data.get("alpha", retrieval_data.get("vector_weight", 1.0)), # 基础分数保留系数
-            beta=retrieval_data.get("beta", retrieval_data.get("graph_weight", 0.15)), # 图谱增强权重
-                gamma=retrieval_data.get("gamma", 0.1),   # 偏好加成权重
+                # 修复问题2：兼容 config.yaml 的 vector_weight/graph_weight 命名
+                alpha=retrieval_data.get("alpha", retrieval_data.get("vector_weight", 1.0)),  # 基础分数保留系数
+                beta=retrieval_data.get("beta", retrieval_data.get("graph_weight", 0.15)),  # 图谱增强权重
+                gamma=retrieval_data.get("gamma", 0.1),  # 偏好加成权重
                 max_context_tokens=retrieval_data.get("max_context_tokens", 3500),
             ),
             memify=MemifyConfig(

@@ -46,87 +46,87 @@ from retriever.hybrid_engine import HybridEngine
 from scanner.scan_engine import DEFAULT_SKIP_DIRS, Scanner
 from storage.database import DatabaseManager
 from utils.jieba_helper import load_jieba_user_dict
-from utils.logger import setup_logger
-
-logger = setup_logger(level="INFO")
+from utils.logger import logger
 
 
 def cmd_status(args):
     """显示系统状态 (优化版：DB直查 + 全维度配置摘要)"""
-    print("\n📊 tinyRAG 系统状态\n" + "=" * 50)
+    logger.info("\n📊 tinyRAG 系统状态\n" + "=" * 50)
     try:
         cfg = load_config()
         db_path = Path(cfg.db_path).resolve()
-        print(f"🗄️ 数据库路径: {db_path}")
+        logger.info(f"🗄️ 数据库路径: {db_path}")
 
         if db_path.exists():
             db_size = db_path.stat().st_size / 1024 / 1024
-            print(f"   大小: {db_size:.2f} MB")
+            logger.info(f"   大小: {db_size:.2f} MB")
 
             db = DatabaseManager(str(db_path), vec_dimension=cfg.embedding_model.dimensions)
             try:
                 # 1. 活跃数据
                 files_active = db.conn.execute("SELECT COUNT(*) FROM files WHERE is_deleted=0").fetchone()[0]
                 chunks_active = db.conn.execute("SELECT COUNT(*) FROM chunks WHERE is_deleted=0").fetchone()[0]
-                print(f"   活跃 Files: {files_active} | 活跃 Chunks: {chunks_active}")
+                logger.info(f"   活跃 Files: {files_active} | 活跃 Chunks: {chunks_active}")
 
                 # 2. 软删除统计 (运维关键指标)
                 files_deleted = db.conn.execute("SELECT COUNT(*) FROM files WHERE is_deleted=1").fetchone()[0]
                 chunks_deleted = db.conn.execute("SELECT COUNT(*) FROM chunks WHERE is_deleted=1").fetchone()[0]
-                print(f"   软删除 Files: {files_deleted} | 软删除 Chunks: {chunks_deleted}")
+                logger.info(f"   软删除 Files: {files_deleted} | 软删除 Chunks: {chunks_deleted}")
 
                 # 3. 向量引擎状态
-                print(f"   向量引擎: {'✅ sqlite-vec 已启用' if db.vec_support else '⚠️ 已降级 (FTS5)'}")
+                logger.info(f"   向量引擎: {'✅ sqlite-vec 已启用' if db.vec_support else '⚠️ 已降级 (FTS5)'}")
 
                 # 4. 按 Vault 统计 (直接查 DB，替代慢速 os.walk)
-                print("\n📂 Vault 索引状态:")
+                logger.info("\n📂 Vault 索引状态:")
                 vault_stats = db.conn.execute(
                     "SELECT vault_name, COUNT(*) as cnt FROM files WHERE is_deleted=0 GROUP BY vault_name"
                 ).fetchall()
                 total_db_files = 0
                 for row in vault_stats:
-                    print(f"   ✅ {row['vault_name']}: {row['cnt']} 个已索引文件")
+                    logger.info(f"   ✅ {row['vault_name']}:  {row['cnt']} 个已索引文件")
                     total_db_files += row["cnt"]
                 if total_db_files == 0:
-                    print("   ⚠️ 暂无已索引文件，请运行 `python rag_cli.py index build --force`")
+                    logger.info("   ⚠️ 暂无已索引文件，请运行 `python rag_cli.py index build --force`")
                 else:
-                    print(f"   📈 总计: {total_db_files} 个已索引文件")
+                    logger.info(f"   📈 总计: {total_db_files} 个已索引文件")
 
                 # 5. 缓存状态
                 cache_path = Path(cfg.cache.db_path).resolve()
-                print(f"\n💾 查询缓存: {cfg.cache.db_path} (TTL={cfg.cache.ttl_seconds}s, Max={cfg.cache.max_entries})")
+                logger.info(
+                    f"\n💾 查询缓存: {cfg.cache.db_path} (TTL={cfg.cache.ttl_seconds}s, Max={cfg.cache.max_entries})"
+                )
                 if cache_path.exists():
                     cache_size = cache_path.stat().st_size / 1024 / 1024
-                    print(f"   状态: ✅ 已存在 ({cache_size:.2f} MB)")
+                    logger.info(f"   状态: ✅ 已存在 ({cache_size:.2f} MB)")
                 else:
-                    print("   状态: ⏳ 未初始化 (首次检索时自动创建)")
+                    logger.info("   状态: ⏳ 未初始化 (首次检索时自动创建)")
 
             finally:
                 db.close()
         else:
-            print("❌ 数据库未初始化，请运行: `python rag_cli.py index build --force`")
+            logger.info("❌ 数据库未初始化，请运行: `python rag_cli.py index build --force`")
 
         # 核心配置摘要 (便于快速排查参数)
-        print("\n⚙️ 核心配置摘要")
-        print(
+        logger.info("\n⚙️ 核心配置摘要")
+        logger.info(
             f"   🤖 模型: {cfg.embedding_model.name} (dim={cfg.embedding_model.dimensions}, batch={cfg.embedding_model.batch_size})"
         )
-        print(f"   🔍 检索: alpha={cfg.retrieval.get('alpha', 0.7)}, beta={cfg.retrieval.get('beta', 0.3)}")
-        print(f"   ✂️ 分块: max_tokens={cfg.chunking.max_tokens}, overlap={cfg.chunking.overlap}")
-        print(
+        logger.info(f"   🔍 检索: alpha={cfg.retrieval.get('alpha', 0.7)}, beta={cfg.retrieval.get('beta', 0.3)}")
+        logger.info(f"   ✂️ 分块: max_tokens={cfg.chunking.max_tokens}, overlap={cfg.chunking.overlap}")
+        logger.info(
             f"   🕒 衰减: {'✅ 启用' if cfg.confidence.date_decay.enabled else '❌ 禁用'} (半衰期={cfg.confidence.date_decay.half_life_days}天)"
         )
 
         # 插件状态
-        print("\n🔌 插件系统")
-        print(f"   状态: {'✅ 已启用' if cfg.plugins.enabled else '❌ 已禁用'}")
+        logger.info("\n🔌 插件系统")
+        logger.info(f"   状态: {'✅ 已启用' if cfg.plugins.enabled else '❌ 已禁用'}")
         if cfg.plugins.enabled and cfg.plugins.plugins:
-            print("   已配置插件:")
+            logger.info("   已配置插件:")
             for p in cfg.plugins.plugins:
                 status = "✅" if p.enabled else "⏸️"
-                print(f"      {status} {p.name} (priority={p.priority})")
+                logger.info(f"      {status} {p.name} (priority={p.priority})")
 
-        print("\n" + "=" * 50)
+        logger.info("\n" + "=" * 50)
         return 0
     except Exception as e:
         logger.error(f"❌ 状态检查失败: {e}")
@@ -167,6 +167,7 @@ def cmd_search(args):
 
         if args.verbose:
             import logging
+
             logging.getLogger().setLevel(logging.DEBUG)
 
         db = DatabaseManager(str(db_path), vec_dimension=cfg.embedding_model.dimensions)
@@ -216,7 +217,7 @@ def cmd_search(args):
                     results=[r.__dict__ for r in results],
                     query_vec=query_vec,
                     base_alpha=alpha,  # 传递基础检索的 alpha 权重
-                    base_beta=beta,    # 传递基础检索的 beta 权重
+                    base_beta=beta,  # 传递基础检索的 beta 权重
                 )
                 # 如果插件返回了增强结果，使用增强结果替换原始结果
                 if enhanced_results and isinstance(enhanced_results, list) and len(enhanced_results) > 0:
@@ -225,6 +226,7 @@ def cmd_search(args):
                     if isinstance(first_result, list) and len(first_result) > 0:
                         # 将插件增强结果转换为 RetrievalResult 兼容格式
                         from retriever.hybrid_engine import RetrievalResult
+
                         plugin_results = []
                         for r in first_result:
                             # 检查是否已经是 RetrievalResult
@@ -232,30 +234,32 @@ def cmd_search(args):
                                 plugin_results.append(r)
                             elif isinstance(r, dict):
                                 # 从插件结果构建 RetrievalResult（统一评分，保留基础分数）
-                                plugin_results.append(RetrievalResult(
-                                    chunk_id=r.get("chunk_id", 0),
-                                    content=r.get("content", ""),
-                                    file_path=r.get("file_path", ""),
-                                    absolute_path=r.get("absolute_path", r.get("file_path", "")),
-                                    section=r.get("section", ""),
-                                    start_pos=r.get("start_pos", 0),
-                                    end_pos=r.get("end_pos", 0),
-                                    vault_name=r.get("vault_name", ""),
-                                    chunk_type=r.get("chunk_type", ""),
-                                    # 保留基础检索分数
-                                    semantic_score=r.get("semantic_score", r.get("vector_score", 0.0)),
-                                    keyword_score=r.get("keyword_score", 0.0),
-                                    confidence_score=r.get("confidence_score", 1.0),
-                                    final_score=r.get("final_score", r.get("score", 0.0)),
-                                    confidence_reason=r.get("confidence_reason", ""),
-                                    file_hash=r.get("file_hash", ""),
-                                    # 图谱增强分值（插件启用时才有）
-                                    graph_score=r.get("graph_score", 0.0),
-                                    preference_score=r.get("preference_score", 0.0),
-                                    hop_distance=r.get("hop_distance", 0),
-                                    # 基础检索分数（修复问题3）
-                                    base_final_score=r.get("base_final_score", r.get("final_score", 0.0)),
-                                ))
+                                plugin_results.append(
+                                    RetrievalResult(
+                                        chunk_id=r.get("chunk_id", 0),
+                                        content=r.get("content", ""),
+                                        file_path=r.get("file_path", ""),
+                                        absolute_path=r.get("absolute_path", r.get("file_path", "")),
+                                        section=r.get("section", ""),
+                                        start_pos=r.get("start_pos", 0),
+                                        end_pos=r.get("end_pos", 0),
+                                        vault_name=r.get("vault_name", ""),
+                                        chunk_type=r.get("chunk_type", ""),
+                                        # 保留基础检索分数
+                                        semantic_score=r.get("semantic_score", r.get("vector_score", 0.0)),
+                                        keyword_score=r.get("keyword_score", 0.0),
+                                        confidence_score=r.get("confidence_score", 1.0),
+                                        final_score=r.get("final_score", r.get("score", 0.0)),
+                                        confidence_reason=r.get("confidence_reason", ""),
+                                        file_hash=r.get("file_hash", ""),
+                                        # 图谱增强分值（插件启用时才有）
+                                        graph_score=r.get("graph_score", 0.0),
+                                        preference_score=r.get("preference_score", 0.0),
+                                        hop_distance=r.get("hop_distance", 0),
+                                        # 基础检索分数（修复问题3）
+                                        base_final_score=r.get("base_final_score", r.get("final_score", 0.0)),
+                                    )
+                                )
                         if plugin_results:
                             results = plugin_results
                             if args.verbose:
@@ -273,7 +277,7 @@ def cmd_search(args):
                 "total": len(results),
                 "plugin_enabled": plugin_enabled,
                 "elapsed_ms": round(elapsed * 1000, 2),
-                "results": []
+                "results": [],
             }
             for i, r in enumerate(results):
                 result_item = {
@@ -288,13 +292,13 @@ def cmd_search(args):
                 }
                 # 插件启用时，添加图谱增强字段
                 if plugin_enabled:
-                    result_item["graph_score"] = round(getattr(r, 'graph_score', 0.0), 4)
-                    result_item["preference_score"] = round(getattr(r, 'preference_score', 0.0), 4)
-                    result_item["hop_distance"] = getattr(r, 'hop_distance', 0)
+                    result_item["graph_score"] = round(getattr(r, "graph_score", 0.0), 4)
+                    result_item["preference_score"] = round(getattr(r, "preference_score", 0.0), 4)
+                    result_item["hop_distance"] = getattr(r, "hop_distance", 0)
                     # 修复问题3：添加 base_final_score 字段便于调试和验证
-                    result_item["base_final_score"] = round(getattr(r, 'base_final_score', r.final_score), 4)
+                    result_item["base_final_score"] = round(getattr(r, "base_final_score", r.final_score), 4)
                 output_data["results"].append(result_item)
-            print(json.dumps(output_data, indent=2, ensure_ascii=False))
+            logger.info(json.dumps(output_data, indent=2, ensure_ascii=False))
         elif args.output == "csv":
             output = StringIO()
             writer = csv.DictWriter(
@@ -328,13 +332,13 @@ def cmd_search(args):
                         "confidence_reason": r.confidence_reason,
                     }
                 )
-            print(output.getvalue())
+            logger.info(output.getvalue())
         else:
             # 🖥️ 终端输出
             plugin_tag = " [插件增强]" if plugin_enabled else ""
-            print(f"\n📊 检索结果 ({len(results)} 条, 耗时 {elapsed:.2f}s){plugin_tag}:\n")
+            logger.info(f"\n📊 检索结果 ({len(results)} 条, 耗时 {elapsed:.2f}s){plugin_tag}:\n")
             if not results:
-                print("   未找到相关结果.")
+                logger.info("   未找到相关结果.")
                 return 0
             for i, r in enumerate(results, 1):
                 content_preview = r.content[:200] + "..." if len(r.content) > 200 else r.content
@@ -342,16 +346,16 @@ def cmd_search(args):
                 scores = f"最终={r.final_score:.3f} | 语义={r.semantic_score:.3f} | 关键词={r.keyword_score:.3f}"
                 # 插件启用时，显示图谱增强分值
                 if plugin_enabled:
-                    graph_score = getattr(r, 'graph_score', 0.0)
-                    hop_distance = getattr(r, 'hop_distance', 0)
+                    graph_score = getattr(r, "graph_score", 0.0)
+                    hop_distance = getattr(r, "hop_distance", 0)
                     scores += f" | 图={graph_score:.3f}"
                     if hop_distance > 0:
                         scores += f" (跳数={hop_distance})"
                 scores += f" | 置信度={r.confidence_score:.2f}"
-                print(f"{i}. [{scores}]")
-                print(f"   来源:{r.absolute_path}")
-                print(f"   类型:{r.vault_name} / {r.chunk_type} | 章节:{r.section}")
-                print(f"   内容:{content_preview}\n")
+                logger.info(f"{i}. [{scores}]")
+                logger.info(f"   来源:{r.absolute_path}")
+                logger.info(f"   类型:{r.vault_name} / {r.chunk_type} | 章节:{r.section}")
+                logger.info(f"   内容:{content_preview}\n")
         return 0
     except Exception as e:
         logger.error(f"❌ 检索失败: {e}", exc_info=True)
@@ -371,10 +375,10 @@ def cmd_config(args):
 
     if args.show:
         if config_path.exists():
-            print("\n📄 配置文件 (config.yaml):\n")
-            print(config_path.read_text(encoding="utf-8"))
+            logger.info("\n📄 配置文件 (config.yaml):\n")
+            logger.info(config_path.read_text(encoding="utf-8"))
         else:
-            print(f"❌ 配置文件不存在: {config_path}")
+            logger.info(f"❌ 配置文件不存在: {config_path}")
         return 0
 
     if args.parsed:
@@ -386,8 +390,8 @@ def cmd_config(args):
 
             adapter = TypeAdapter(type(cfg))
             data = adapter.dump_python(cfg, mode="json")
-            print("\n📋 解析后的配置 (JSON):\n")
-            print(json.dumps(data, indent=2, ensure_ascii=False))
+            logger.info("\n📋 解析后的配置 (JSON):\n")
+            logger.info(json.dumps(data, indent=2, ensure_ascii=False))
         except Exception as e:
             logger.error(f"❌ 配置解析失败: {e}")
             return 1
@@ -396,34 +400,34 @@ def cmd_config(args):
     if args.validate:
         try:
             cfg = load_config(str(config_path))
-            print("\n✅ 配置验证通过!\n")
-            print("📂 仓库路径检查:")
+            logger.info("\n✅ 配置验证通过!\n")
+            logger.info("📂 仓库路径检查:")
             for v in cfg.vaults:
                 v_path = Path(v.path).expanduser()
                 if v_path.exists():
-                    print(f"   ✅ {v.name}: {v.path}")
+                    logger.info(f"   ✅ {v.name}: {v.path}")
                 else:
-                    print(f"   ⚠️ {v.name}: {v.path} (路径不存在)")
-            print("\n🗄️ 数据库路径检查:")
+                    logger.info(f"   ⚠️ {v.name}: {v.path} (路径不存在)")
+            logger.info("\n🗄️ 数据库路径检查:")
             db_path = Path(cfg.db_path).expanduser()
             if db_path.parent.exists():
-                print(f"   ✅ 数据库目录存在: {db_path.parent}")
+                logger.info(f"   ✅ 数据库目录存在: {db_path.parent}")
             else:
-                print(f"   ⚠️ 数据库目录不存在: {db_path.parent} (首次运行将自动创建)")
+                logger.info(f"   ⚠️ 数据库目录不存在: {db_path.parent} (首次运行将自动创建)")
             if cfg.jieba_user_dict:
                 dict_path = Path(cfg.jieba_user_dict).expanduser()
                 if dict_path.exists():
-                    print(f"   ✅ jieba 词典: {dict_path}")
+                    logger.info(f"   ✅ jieba 词典: {dict_path}")
                 else:
-                    print(f"   ⚠️ jieba 词典不存在: {dict_path}")
+                    logger.info(f"   ⚠️ jieba 词典不存在: {dict_path}")
             return 0
         except Exception as e:
-            print(f"\n❌ 配置验证失败: {e}\n")
+            logger.info(f"\n❌ 配置验证失败: {e}\n")
             return 1
 
     if args.edit:
         if not config_path.exists():
-            print(f"❌ 配置文件不存在: {config_path}")
+            logger.info(f"❌ 配置文件不存在: {config_path}")
             return 1
         import shutil
         import subprocess
@@ -431,9 +435,9 @@ def cmd_config(args):
         editors = [os.environ.get("EDITOR"), os.environ.get("VISUAL"), "nano", "vim", "vi", "code", "gedit"]
         editor = next((e for e in editors if e and shutil.which(e)), None)
         if not editor:
-            print("❌ 未找到可用编辑器！请设置 EDITOR 环境变量")
+            logger.info("❌ 未找到可用编辑器！请设置 EDITOR 环境变量")
             return 1
-        print(f"📝 使用编辑器: {editor}")
+        logger.info(f"📝 使用编辑器: {editor}")
         subprocess.run([editor, str(config_path)])
         return 0
     return 0
@@ -455,7 +459,7 @@ def cmd_index(args):
             plugin_loader = None
 
     if args.action == "build":
-        print("🔄 触发全量索引重建...")
+        logger.info("🔄 触发全量索引重建...")
         old_argv = sys.argv
         try:
             sys.argv = ["build_index", "--force"]
@@ -473,7 +477,7 @@ def cmd_index(args):
     # =========================
 
     if args.action == "scan":
-        print("🔍 执行增量扫描与索引更新...")
+        logger.info("🔍 执行增量扫描与索引更新...")
         db = DatabaseManager(cfg.db_path, vec_dimension=cfg.embedding_model.dimensions)
 
         if plugin_loader:
@@ -501,7 +505,7 @@ def cmd_index(args):
             changed_paths.extend([f.new_absolute_path for f in report.moved_files])
 
             if not changed_paths:
-                print("   ℹ️ 扫描报告为空，无需更新。")
+                logger.info("   ℹ️ 扫描报告为空，无需更新。")
                 return 0
 
             placeholders = ",".join(["?"] * len(changed_paths))
@@ -512,10 +516,10 @@ def cmd_index(args):
             files_to_index = [dict(row) for row in cursor.fetchall()]
 
             if not files_to_index:
-                print("   ℹ️ 无待索引文件。")
+                logger.info("   ℹ️ 无待索引文件。")
                 return 0
 
-            print(f"   📦 发现 {len(files_to_index)} 个变更文件，开始重建索引...")
+            logger.info(f"   📦 发现 {len(files_to_index)} 个变更文件，开始重建索引...")
 
             splitter = MarkdownSplitter(cfg)
 
@@ -548,7 +552,6 @@ def cmd_index(args):
             # 并发处理
             with ThreadPoolExecutor(max_workers=cfg.max_concurrent_files) as ex:
                 for fid, chunks, fp, fabs, status in ex.map(_split_file, files_to_index):
-
                     if not chunks:
                         if status != "OK":
                             logger.warning(f"⚠️ 分块失败 {fp}: {status}")
@@ -585,7 +588,7 @@ def cmd_index(args):
             # 插件钩子
             if plugin_loader and file_chunks_collector:
                 try:
-                    print(f"   🔧 触发插件 on_file_indexed 钩子处理 {len(file_chunks_collector)} 个文件...")
+                    logger.info(f"   🔧 触发插件 on_file_indexed 钩子处理 {len(file_chunks_collector)} 个文件...")
                     for file_id, data in file_chunks_collector.items():
                         plugin_loader.invoke_hook(
                             "on_file_indexed",
@@ -594,17 +597,17 @@ def cmd_index(args):
                             filepath=data["file_path"],
                             absolute_path=data.get("absolute_path", ""),
                         )
-                    print("   ✅ 插件钩子处理完成")
+                    logger.info("   ✅ 插件钩子处理完成")
                 except Exception as e:
                     logger.warning(f"⚠️ on_file_indexed 钩子执行失败: {e}")
 
             if processed == 0:
                 if empty_files == len(files_to_index):
-                    print("   ⚠️ 所有文件为空或被过滤")
+                    logger.info("   ⚠️ 所有文件为空或被过滤")
                 else:
-                    print("   ℹ️ 未生成新 chunks")
+                    logger.info("   ℹ️ 未生成新 chunks")
             else:
-                print(f"   ✅ 增量重建完成：{processed} chunks")
+                logger.info(f"   ✅ 增量重建完成：{processed} chunks")
 
             return 0
 
@@ -620,6 +623,7 @@ def cmd_index(args):
 # =========================
 # 修改点 2：_commit_batch 修复 fabs
 # =========================
+
 
 def _commit_batch(pending, embed_engine, db, plugin_loader=None, file_chunks_collector=None):
     import json
@@ -643,10 +647,8 @@ def _commit_batch(pending, embed_engine, db, plugin_loader=None, file_chunks_col
 
         # ✅ 修复：解包 fabs
         for (fid, chunk, fp, fabs), emb in zip(pending, embs):
-
             meta_json = json.dumps(
-                chunk.metadata or {},
-                default=lambda o: o.isoformat() if isinstance(o, (date, datetime)) else str(o)
+                chunk.metadata or {}, default=lambda o: o.isoformat() if isinstance(o, (date, datetime)) else str(o)
             )
 
             conf_json = json.dumps(
@@ -678,27 +680,23 @@ def _commit_batch(pending, embed_engine, db, plugin_loader=None, file_chunks_col
             # ✅ 修复 fabs
             if file_chunks_collector is not None:
                 if fid not in file_chunks_collector:
-                    file_chunks_collector[fid] = {
-                        'chunks': [],
-                        'file_path': fp,
-                        'absolute_path': fabs
-                    }
+                    file_chunks_collector[fid] = {"chunks": [], "file_path": fp, "absolute_path": fabs}
 
-                file_chunks_collector[fid]['chunks'].append({
-                    'id': cid,
-                    'content': chunk.content,
-                    'metadata': chunk.metadata,
-                })
+                file_chunks_collector[fid]["chunks"].append(
+                    {
+                        "id": cid,
+                        "content": chunk.content,
+                        "metadata": chunk.metadata,
+                    }
+                )
 
             if db.vec_support:
                 db.conn.execute(
-                    "INSERT INTO vectors (chunk_id, embedding) VALUES (?,?)",
-                    (cid, array.array("f", emb).tobytes())
+                    "INSERT INTO vectors (chunk_id, embedding) VALUES (?,?)", (cid, array.array("f", emb).tobytes())
                 )
 
             db.conn.execute(
-                "INSERT INTO fts5_index (rowid, content) VALUES (?,?)",
-                (cid, build_mod.prepare_fts_content(chunk, fp))
+                "INSERT INTO fts5_index (rowid, content) VALUES (?,?)", (cid, build_mod.prepare_fts_content(chunk, fp))
             )
 
         db.conn.commit()
@@ -720,47 +718,51 @@ def cmd_maintenance(args):
     db = DatabaseManager(cfg.db_path, vec_dimension=cfg.embedding_model.dimensions)
     try:
         stats = vac_mod.check_vacuum_needed(db, cfg)
-        print(f"📊 当前软删除比例: files={stats['files_ratio']:.1f}%, chunks={stats['chunks_ratio']:.1f}%")
-        print(f"   数据库大小: {stats['file_size_mb']:.2f} MB")
+        logger.info(f"📊 当前软删除比例: files={stats['files_ratio']:.1f}%, chunks={stats['chunks_ratio']:.1f}%")
+        logger.info(f"   数据库大小: {stats['file_size_mb']:.2f} MB")
 
         # 显示图谱关联数据统计
         graph_total = (
-            stats.get('relations_to_delete', 0) +
-            stats.get('principles_to_delete', 0) +
-            stats.get('notes_to_delete', 0) +
-            stats.get('jobs_to_delete', 0)
+            stats.get("relations_to_delete", 0)
+            + stats.get("principles_to_delete", 0)
+            + stats.get("notes_to_delete", 0)
+            + stats.get("jobs_to_delete", 0)
         )
         if graph_total > 0:
-            print(f"📊 图谱关联数据: relations={stats.get('relations_to_delete', 0)}, "
-                  f"principles={stats.get('principles_to_delete', 0)}, "
-                  f"notes={stats.get('notes_to_delete', 0)}, "
-                  f"jobs={stats.get('jobs_to_delete', 0)}")
+            logger.info(
+                f"📊 图谱关联数据: relations={stats.get('relations_to_delete', 0)}, "
+                f"principles={stats.get('principles_to_delete', 0)}, "
+                f"notes={stats.get('notes_to_delete', 0)}, "
+                f"jobs={stats.get('jobs_to_delete', 0)}"
+            )
 
         if args.dry_run:
-            print(f"🔍 预计清理: {stats['chunks_deleted']} chunks + {stats['files_deleted']} files + {graph_total} 图谱记录")
+            logger.info(
+                f"🔍 预计清理: {stats['chunks_deleted']} chunks + {stats['files_deleted']} files + {graph_total} 图谱记录"
+            )
             return 0
 
-        print("🧹 开始清理软删除记录（含图谱数据）...")
+        logger.info("🧹 开始清理软删除记录（含图谱数据）...")
         clean_stats = vac_mod.clean_deleted_records(db, dry_run=False)
         total_deleted = (
-            clean_stats['chunks_deleted'] +
-            clean_stats['files_deleted'] +
-            clean_stats.get('relations_deleted', 0) +
-            clean_stats.get('principles_deleted', 0) +
-            clean_stats.get('notes_deleted', 0) +
-            clean_stats.get('jobs_deleted', 0)
+            clean_stats["chunks_deleted"]
+            + clean_stats["files_deleted"]
+            + clean_stats.get("relations_deleted", 0)
+            + clean_stats.get("principles_deleted", 0)
+            + clean_stats.get("notes_deleted", 0)
+            + clean_stats.get("jobs_deleted", 0)
         )
-        print(f"   共删除 {total_deleted} 条记录")
+        logger.info(f"   共删除 {total_deleted} 条记录")
 
         if not args.clean_only:
-            print("🗜️ 执行 VACUUM 空间回收...")
+            logger.info("🗜️ 执行 VACUUM 空间回收...")
             vac_mod.execute_vacuum(db, dry_run=False)
             new_stats = vac_mod.check_vacuum_needed(db, cfg)
             new_size = os.path.getsize(cfg.db_path) / (1024 * 1024)
             saved = stats["file_size_mb"] - new_size
-            print(f"✅ 运维完成 | 节省空间: {saved:.2f} MB" if saved > 0 else "✅ 运维完成 | 空间未明显变化")
+            logger.info(f"✅ 运维完成 | 节省空间: {saved:.2f} MB" if saved > 0 else "✅ 运维完成 | 空间未明显变化")
         else:
-            print("✅ 清理完成 (跳过 VACUUM)")
+            logger.info("✅ 清理完成 (跳过 VACUUM)")
         return 0
     except Exception as e:
         logger.error(f"❌ 运维失败: {e}")

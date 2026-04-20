@@ -8,6 +8,7 @@ graph_builder.py - 异步建图管线
 - 代表 Chunk 映射
 - 关系写入
 """
+
 import asyncio
 import hashlib
 import sqlite3
@@ -15,6 +16,8 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Optional
+
+from loguru import logger
 
 from plugins.tinyrag_memory_graph.config import MemoryGraphConfig
 from plugins.tinyrag_memory_graph.extractor import DualLayerExtractor, WikilinkExtractor
@@ -25,6 +28,7 @@ from plugins.tinyrag_memory_graph.storage import GraphStorage
 @dataclass
 class BuildTask:
     """建图任务"""
+
     note_id: str
     filepath: str
     content: str
@@ -64,8 +68,9 @@ class GraphBuildQueue:
     def _extract_title_from_content(self, content: str) -> str:
         """从文档内容提取标题（回退策略）"""
         import re
+
         # 尝试匹配第一个 # 标题
-        match = re.search(r'^#+\s+(.+?)(?:\s*\n|$)', content, re.MULTILINE)
+        match = re.search(r"^#+\s+(.+?)(?:\s*\n|$)", content, re.MULTILINE)
         if match:
             return match.group(1).strip()
         return ""
@@ -73,6 +78,7 @@ class GraphBuildQueue:
     def _extract_frontmatter(self, content: str) -> dict:
         """从文档内容提取 frontmatter"""
         from plugins.tinyrag_memory_graph.extractor import FrontmatterParser
+
         return FrontmatterParser.parse(content)
 
     def start(self):
@@ -90,13 +96,12 @@ class GraphBuildQueue:
             )
             if cursor.rowcount > 0:
                 self.storage.conn.commit()
-                print(f"[GraphBuildQueue] 🔄 已恢复 {cursor.rowcount} 个中断的任务")
+                logger.info(f"[GraphBuildQueue] 🔄 已恢复 {cursor.rowcount} 个中断的任务")
         except Exception as e:
-            print(f"[GraphBuildQueue] ⚠️ 恢复任务失败: {e}")
+            logger.info(f"[GraphBuildQueue] ⚠️ 恢复任务失败: {e}")
 
         self._executor = ThreadPoolExecutor(
-            max_workers=self.queue_config.max_workers,
-            thread_name_prefix="graph-builder"
+            max_workers=self.queue_config.max_workers, thread_name_prefix="graph-builder"
         )
         self._running = True
 
@@ -111,7 +116,7 @@ class GraphBuildQueue:
                 # Python < 3.9 不支持 cancel_futures 参数
                 self._executor.shutdown(wait=True)
             except Exception as e:
-                print(f"[GraphBuildQueue] 停止时出错: {e}")
+                logger.info(f"[GraphBuildQueue] 停止时出错: {e}")
             finally:
                 self._executor = None
 
@@ -138,6 +143,7 @@ class GraphBuildQueue:
 
         # 先创建 note 记录（因为 graph_build_jobs 有外键约束）
         from plugins.tinyrag_memory_graph.models import Note
+
         note = Note(
             note_id=task.note_id,
             filepath=task.filepath,
@@ -153,11 +159,11 @@ class GraphBuildQueue:
         # 判断执行模式：sync 参数优先，否则检查 executor 状态
         if sync or not (self._executor and self._running):
             # 同步执行（CLI 模式或线程池未启动时）
-            print(f"[GraphBuildQueue] 同步执行任务: {task.note_id}")
+            logger.info(f"[GraphBuildQueue] 同步执行任务: {task.note_id}")
             self._process_task(task, is_sync=True)
         else:
             # 后台执行（服务器模式）
-            print(f"[GraphBuildQueue] 提交后台任务: {task.note_id}")
+            logger.info(f"[GraphBuildQueue] 提交后台任务: {task.note_id}")
             self._executor.submit(self._process_task, task, False)
 
         return job.job_id
@@ -173,12 +179,12 @@ class GraphBuildQueue:
             # 通过 note_id 获取特定任务（而不是任意 pending 任务）
             job = self.storage.get_job_by_note_id(task.note_id)
             if not job:
-                print(f"[GraphBuildQueue] 未找到任务: {task.note_id}")
+                logger.info(f"[GraphBuildQueue] 未找到任务: {task.note_id}")
                 return
 
             # 检查任务状态
             if job.status != "pending":
-                print(f"[GraphBuildQueue] 任务状态不是 pending: {job.status}")
+                logger.info(f"[GraphBuildQueue] 任务状态不是 pending: {job.status}")
                 return
 
             # 异步模式下再次检查运行状态
@@ -215,7 +221,7 @@ class GraphBuildQueue:
                 except Exception:
                     pass  # 数据库可能已关闭
             self._stats["total_failed"] += 1
-            print(f"[GraphBuildQueue] Task failed: {e}")
+            logger.info(f"[GraphBuildQueue] Task failed: {e}")
 
     def _build_graph(self, task: BuildTask) -> dict:
         """
@@ -270,9 +276,7 @@ class GraphBuildQueue:
 
         # 6. Chunk 级抽取
         for i, (chunk_id, chunk_content) in enumerate(zip(task.chunk_ids, task.chunks_content)):
-            chunk_result = extractor.extract_chunk_level(
-                chunk_content, chunk_id, task.note_id
-            )
+            chunk_result = extractor.extract_chunk_level(chunk_content, chunk_id, task.note_id)
 
             # 写入实体
             for entity in chunk_result.entities:
@@ -281,9 +285,7 @@ class GraphBuildQueue:
 
         # 7. 创建 Wikilink 关系（需要全局 chunk_map）
         # 这部分在批量处理后单独执行
-        wikilink_relations = self._create_wikilink_relations(
-            task, doc_result.wikilinks, representative_chunk_id
-        )
+        wikilink_relations = self._create_wikilink_relations(task, doc_result.wikilinks, representative_chunk_id)
         for rel in wikilink_relations:
             self.storage.upsert_relation(rel)
             stats["relations"] += 1
@@ -293,9 +295,7 @@ class GraphBuildQueue:
 
         return stats
 
-    def _find_representative_chunk(self, chunk_ids: list[int],
-                                    chunks_content: list[str],
-                                    wikilinks: list[str]) -> int:
+    def _find_representative_chunk(self, chunk_ids: list[int], chunks_content: list[str], wikilinks: list[str]) -> int:
         """
         查找代表 Chunk（FR-1.4）
 
@@ -321,9 +321,9 @@ class GraphBuildQueue:
 
         return best_chunk_id
 
-    def _create_wikilink_relations(self, task: BuildTask,
-                                    wikilinks: list[str],
-                                    representative_chunk_id: int) -> list[Relation]:
+    def _create_wikilink_relations(
+        self, task: BuildTask, wikilinks: list[str], representative_chunk_id: int
+    ) -> list[Relation]:
         """创建 Wikilink 关系"""
         relations = []
 
@@ -384,10 +384,9 @@ class GraphBuilder:
         """停止后台处理"""
         self.queue.stop()
 
-    def build_for_document(self, filepath: str, content: str,
-                           chunk_ids: list[int],
-                           chunks_content: list[str],
-                           sync: bool = False) -> str:
+    def build_for_document(
+        self, filepath: str, content: str, chunk_ids: list[int], chunks_content: list[str], sync: bool = False
+    ) -> str:
         """
         为文档构建图谱
 

@@ -5,10 +5,13 @@ plugin.py - Memory Graph 插件主类
 实现插件的核心逻辑，整合所有功能模块。
 继承 PluginBase 以支持插件加载器。
 """
+
 import hashlib
 import sqlite3
 import time
 from typing import Optional
+
+from loguru import logger
 
 from plugins.bootstrap import PluginBase  # 继承插件基类
 
@@ -60,11 +63,11 @@ class MemoryGraphPlugin(PluginBase):
         # 解析配置 - 支持多种格式
         if isinstance(config, dict):
             # 兼容格式：{graph: {...}, retrieval: {...}, memify: {...}}
-            if 'graph' in config and 'enabled' not in config:
+            if "graph" in config and "enabled" not in config:
                 # 从 graph 中提取 enabled
                 config = dict(config)  # 复制一份
-                if 'graph' in config:
-                    config['enabled'] = config['graph'].get('enabled', True)
+                if "graph" in config:
+                    config["enabled"] = config["graph"].get("enabled", True)
             self.plugin_config = MemoryGraphConfig.from_dict(config)
         elif isinstance(config, MemoryGraphConfig):
             self.plugin_config = config
@@ -103,8 +106,8 @@ class MemoryGraphPlugin(PluginBase):
         插件加载时调用
         """
         # 如果有上下文，尝试获取数据库连接
-        if self.ctx and hasattr(self.ctx, 'db') and self.ctx.db:
-            self._db = self.ctx.db.conn if hasattr(self.ctx.db, 'conn') else self.ctx.db
+        if self.ctx and hasattr(self.ctx, "db") and self.ctx.db:
+            self._db = self.ctx.db.conn if hasattr(self.ctx.db, "conn") else self.ctx.db
         return True
 
     def on_enable(self) -> bool:
@@ -113,8 +116,8 @@ class MemoryGraphPlugin(PluginBase):
         """
         if not self._db:
             # 尝试从上下文获取
-            if self.ctx and hasattr(self.ctx, 'db'):
-                self._db = self.ctx.db.conn if hasattr(self.ctx.db, 'conn') else self.ctx.db
+            if self.ctx and hasattr(self.ctx, "db"):
+                self._db = self.ctx.db.conn if hasattr(self.ctx.db, "conn") else self.ctx.db
 
         if self._db:
             try:
@@ -123,8 +126,9 @@ class MemoryGraphPlugin(PluginBase):
                 return True
             except Exception as e:
                 # 打印错误信息，便于调试
-                print(f"[MemoryGraphPlugin] ❌ 初始化失败: {e}")
+                logger.info(f"[MemoryGraphPlugin] ❌ 初始化失败: {e}")
                 import traceback
+
                 traceback.print_exc()
                 return False
         return True  # 允许延迟初始化（等待 set_db_connection）
@@ -137,12 +141,13 @@ class MemoryGraphPlugin(PluginBase):
                 try:
                     self._graph_builder.stop()
                 except Exception as e:
-                    print(f"[MemoryGraphPlugin] ⚠️ 停止图谱构建器失败: {e}")
+                    logger.info(f"[MemoryGraphPlugin] ⚠️ 停止图谱构建器失败: {e}")
 
             # 停止代谢引擎（同步方式）
             if self._memify_engine:
                 try:
                     import asyncio
+
                     loop = asyncio.new_event_loop()
                     asyncio.set_event_loop(loop)
                     try:
@@ -150,7 +155,7 @@ class MemoryGraphPlugin(PluginBase):
                     finally:
                         loop.close()
                 except Exception as e:
-                    print(f"[MemoryGraphPlugin] ⚠️ 停止代谢引擎失败: {e}")
+                    logger.info(f"[MemoryGraphPlugin] ⚠️ 停止代谢引擎失败: {e}")
 
             self._started = False
 
@@ -205,7 +210,7 @@ class MemoryGraphPlugin(PluginBase):
             try:
                 self._initialize_sync()
             except Exception as e:
-                print(f"[MemoryGraphPlugin] ⚠️ 初始化失败，跳过清理: {e}")
+                logger.info(f"[MemoryGraphPlugin] ⚠️ 初始化失败，跳过清理: {e}")
                 return None
 
         try:
@@ -231,10 +236,10 @@ class MemoryGraphPlugin(PluginBase):
 
             # 重新启用外键约束
             self._db.execute("PRAGMA foreign_keys = ON")
-            print("[MemoryGraphPlugin] 🧹 索引重建，已清理图谱数据")
+            logger.info("[MemoryGraphPlugin] 🧹 索引重建，已清理图谱数据")
             return {"cleaned": True}
         except Exception as e:
-            print(f"[MemoryGraphPlugin] ❌ 清理图谱数据失败: {e}")
+            logger.info(f"[MemoryGraphPlugin] ❌ 清理图谱数据失败: {e}")
             # 确保外键约束恢复
             try:
                 self._db.execute("PRAGMA foreign_keys = ON")
@@ -242,7 +247,9 @@ class MemoryGraphPlugin(PluginBase):
                 pass
             return None
 
-    async def _on_file_indexed_hook(self, file_id: int, chunks: list, filepath: str = "", absolute_path: str = "", **kwargs):
+    async def _on_file_indexed_hook(
+        self, file_id: int, chunks: list, filepath: str = "", absolute_path: str = "", **kwargs
+    ):
         """文件索引完成钩子 - 读取原始文件内容获取完整 frontmatter"""
         if not self.plugin_config.enabled:
             return None
@@ -252,21 +259,23 @@ class MemoryGraphPlugin(PluginBase):
         file_to_read = absolute_path or filepath
         if file_to_read:
             try:
-                with open(file_to_read, 'r', encoding='utf-8') as f:
+                with open(file_to_read, "r", encoding="utf-8") as f:
                     full_content = f.read()
             except Exception as e:
-                print(f"[MemoryGraphPlugin] ⚠️ 无法读取文件 {file_to_read}: {e}")
-                full_content = '\n'.join([c.get('content', '') if isinstance(c, dict) else getattr(c, 'content', '') for c in chunks])
+                logger.info(f"[MemoryGraphPlugin] ⚠️ 无法读取文件 {file_to_read}: {e}")
+                full_content = "\n".join(
+                    [c.get("content", "") if isinstance(c, dict) else getattr(c, "content", "") for c in chunks]
+                )
 
         # 提取 chunk_ids 和内容
-        chunk_ids = [c.get('id') if isinstance(c, dict) else getattr(c, 'id', 0) for c in chunks]
-        chunks_content = [c.get('content', '') if isinstance(c, dict) else getattr(c, 'content', '') for c in chunks]
+        chunk_ids = [c.get("id") if isinstance(c, dict) else getattr(c, "id", 0) for c in chunks]
+        chunks_content = [c.get("content", "") if isinstance(c, dict) else getattr(c, "content", "") for c in chunks]
 
         ctx = HookContext(
-            document=full_content or '\n'.join(chunks_content),
+            document=full_content or "\n".join(chunks_content),
             chunk_ids=chunk_ids,
             chunks_content=chunks_content,
-            metadata={"file_id": file_id, "filepath": filepath, "absolute_path": absolute_path, **kwargs}
+            metadata={"file_id": file_id, "filepath": filepath, "absolute_path": absolute_path, **kwargs},
         )
         result = await self.on_add_document(ctx)
         return result
@@ -281,18 +290,14 @@ class MemoryGraphPlugin(PluginBase):
             return None
 
         # 收集 chunk 信息，稍后批量处理
-        if not hasattr(self, '_pending_chunks'):
+        if not hasattr(self, "_pending_chunks"):
             self._pending_chunks = {}
 
         if file_id not in self._pending_chunks:
-            self._pending_chunks[file_id] = {
-                'chunk_ids': [],
-                'contents': [],
-                'metadata': metadata or {}
-            }
+            self._pending_chunks[file_id] = {"chunk_ids": [], "contents": [], "metadata": metadata or {}}
 
-        self._pending_chunks[file_id]['chunk_ids'].append(chunk_id)
-        self._pending_chunks[file_id]['contents'].append(content)
+        self._pending_chunks[file_id]["chunk_ids"].append(chunk_id)
+        self._pending_chunks[file_id]["contents"].append(content)
 
         return None
 
@@ -303,11 +308,11 @@ class MemoryGraphPlugin(PluginBase):
 
         ctx = HookContext(
             query=query,
-            query_vec=kwargs.get('query_vec'),
+            query_vec=kwargs.get("query_vec"),
             results=results,
             # 修复问题1：接收基础检索的权重参数
-            base_alpha=kwargs.get('base_alpha'),
-            base_beta=kwargs.get('base_beta'),
+            base_alpha=kwargs.get("base_alpha"),
+            base_beta=kwargs.get("base_beta"),
         )
         result = await self.on_search_after(ctx)
         if result.modified:
@@ -335,10 +340,11 @@ class MemoryGraphPlugin(PluginBase):
         if self._enabled and not self._initialized:
             try:
                 self._initialize_sync()
-                print("[MemoryGraphPlugin] ✅ 数据库连接已设置，Schema 初始化完成")
+                logger.info("[MemoryGraphPlugin] ✅ 数据库连接已设置，Schema 初始化完成")
             except Exception as e:
-                print(f"[MemoryGraphPlugin] ❌ 初始化失败: {e}")
+                logger.info(f"[MemoryGraphPlugin] ❌ 初始化失败: {e}")
                 import traceback
+
                 traceback.print_exc()
 
     async def initialize(self):
@@ -440,8 +446,7 @@ class MemoryGraphPlugin(PluginBase):
                 self._metrics.histogram("on_add_document_latency_ms", latency)
 
             return HookResult.ok(
-                message=f"Graph build job submitted: {job_id}",
-                metrics={"latency_ms": latency, "job_id": job_id}
+                message=f"Graph build job submitted: {job_id}", metrics={"latency_ms": latency, "job_id": job_id}
             )
 
         except Exception as e:
@@ -453,13 +458,16 @@ class MemoryGraphPlugin(PluginBase):
 
         增强检索结果，应用图谱扩展。
         """
+        logger.info(f"[MemoryGraphPlugin] on_search_after called, enabled={self.plugin_config.enabled}, retriever={self._hybrid_retriever is not None}")
         if not self.plugin_config.enabled or not self._hybrid_retriever:
             return HookResult.ok("Plugin disabled or not initialized")
 
         if not ctx.query_vec or not ctx.results:
+            logger.info(f"[MemoryGraphPlugin] No query vector or results to enhance")
             return HookResult.ok("No query vector or results to enhance")
 
         start_time = time.time()
+        logger.info(f"[MemoryGraphPlugin] Starting graph enhancement, results count={len(ctx.results)}")
 
         try:
             # 提取向量检索结果
@@ -467,26 +475,34 @@ class MemoryGraphPlugin(PluginBase):
             for r in ctx.results:
                 chunk_id = r.get("chunk_id") or r.get("id")
                 if chunk_id:
-                    vector_results.append({
-                        "chunk_id": chunk_id,
-                        "score": r.get("semantic_score", r.get("score", 0.5)),
-                    })
+                    vector_results.append(
+                        {
+                            "chunk_id": chunk_id,
+                            "score": r.get("semantic_score", r.get("score", 0.5)),
+                        }
+                    )
+
+            logger.info(f"[MemoryGraphPlugin] Extracted {len(vector_results)} vector results")
 
             # 修复问题1：使用从 rag_cli 传递的基础检索权重，如果没有则使用插件配置
             # 注意：这里的 alpha 是基础分数保留系数，不是 HybridEngine 的语义权重
             # 当基础检索使用了特定的 alpha/beta 时，图谱增强应该感知但不重复计算
-            graph_alpha = self.retrieval_config.alpha if ctx.base_alpha is None else 1.0
-            graph_beta = self.retrieval_config.beta
+            graph_alpha = self.plugin_config.retrieval.alpha if ctx.base_alpha is None else 1.0
+            graph_beta = self.plugin_config.retrieval.beta
+
+            logger.info(f"[MemoryGraphPlugin] graph_alpha={graph_alpha}, graph_beta={graph_beta}")
 
             # 执行图谱增强检索
+            logger.info(f"[MemoryGraphPlugin] Calling HybridRetriever.search, query={ctx.query}, top_k={len(ctx.results)}")
             enhanced_results = self._hybrid_retriever.search(
                 query=ctx.query,
                 query_vec=ctx.query_vec,
                 top_k=len(ctx.results),
-                base_results=ctx.results,  # 传递基础检索结果，保留 (v×alpha + k×beta) × conf
+                base_results=ctx.results,  # 传递基础检索结果，保留 (v×alpha + beta) × conf
                 alpha=graph_alpha,  # 基础分数保留系数
-                beta=graph_beta,    # 图谱增强权重
+                beta=graph_beta,  # 图谱增强权重
             )
+            logger.info(f"[MemoryGraphPlugin] HybridRetriever.search returned {len(enhanced_results)} results")
 
             # 合并结果
             if enhanced_results:
@@ -504,21 +520,23 @@ class MemoryGraphPlugin(PluginBase):
                     plugin_semantic = er.semantic_score
                     final_semantic = orig_semantic if orig_semantic is not None else plugin_semantic
 
-                    new_results.append({
-                        "chunk_id": er.chunk_id,
-                        "content": er.content,
-                        "file_path": er.file_path,
-                        "section": er.section,
-                        "final_score": er.final_score,  # 包含图谱增强的最终分数
-                        "base_final_score": er.base_final_score,  # 保留基础检索分数
-                        "semantic_score": final_semantic,  # 保留原始语义分（keyword 模式下应为 0）
-                        "keyword_score": orig.get("keyword_score", er.keyword_score),  # 保留原始关键词得分
-                        "confidence_score": orig.get("confidence_score", er.confidence_score),  # 保留原始置信度
-                        "graph_score": er.graph_score,
-                        "hop_distance": er.hop_distance,
-                        "tags": er.tags,
-                        "note_title": er.note_title,
-                    })
+                    new_results.append(
+                        {
+                            "chunk_id": er.chunk_id,
+                            "content": er.content,
+                            "file_path": er.file_path,
+                            "section": er.section,
+                            "final_score": er.final_score,  # 包含图谱增强的最终分数
+                            "base_final_score": er.base_final_score,  # 保留基础检索分数
+                            "semantic_score": final_semantic,  # 保留原始语义分（keyword 模式下应为 0）
+                            "keyword_score": orig.get("keyword_score", er.keyword_score),  # 保留原始关键词得分
+                            "confidence_score": orig.get("confidence_score", er.confidence_score),  # 保留原始置信度
+                            "graph_score": er.graph_score,
+                            "hop_distance": er.hop_distance,
+                            "tags": er.tags,
+                            "note_title": er.note_title,
+                        }
+                    )
 
                 # 更新上下文
                 ctx.results = new_results
@@ -536,7 +554,7 @@ class MemoryGraphPlugin(PluginBase):
             return HookResult.ok(
                 message=f"Enhanced {len(enhanced_results)} results",
                 modified=True,
-                metrics={"latency_ms": latency, "results_count": len(enhanced_results)}
+                metrics={"latency_ms": latency, "results_count": len(enhanced_results)},
             )
 
         except Exception as e:
@@ -562,7 +580,7 @@ class MemoryGraphPlugin(PluginBase):
                                access_count = access_count + 1,
                                last_accessed = strftime('%s', 'now')
                            WHERE id = ?""",
-                        (cid,)
+                        (cid,),
                     )
 
                 # 记录标签共现
@@ -592,8 +610,9 @@ class MemoryGraphPlugin(PluginBase):
 
     # ==================== 公开 API ====================
 
-    def search(self, query: str, query_vec: list[float],
-               top_k: int = 10, preferences: dict = None) -> list[HybridSearchResult]:
+    def search(
+        self, query: str, query_vec: list[float], top_k: int = 10, preferences: dict = None
+    ) -> list[HybridSearchResult]:
         """
         执行图谱增强检索
 
