@@ -94,7 +94,6 @@ class MemoryGraphPlugin(PluginBase):
 
         # 注册钩子
         self.register_hook("on_file_indexed", self._on_file_indexed_hook)
-        self.register_hook("on_chunks_indexed", self._on_chunks_indexed_hook)  # 兼容 build_index.py
         self.register_hook("on_search", self._on_search_hook)
         self.register_hook("on_response_generated", self._on_response_hook)
         self.register_hook("on_index_rebuild", self._on_index_rebuild_hook)
@@ -277,27 +276,6 @@ class MemoryGraphPlugin(PluginBase):
         )
         result = await self.on_add_document(ctx)
         return result
-
-    async def _on_chunks_indexed_hook(self, chunk_id: int, file_id: int, content: str, metadata: dict, **kwargs):
-        """
-        单个 chunk 索引完成钩子（由 build_index.py 调用）
-
-        收集同一文件的 chunks，在文件处理完成后批量构建图谱。
-        """
-        if not self.plugin_config.enabled:
-            return None
-
-        # 收集 chunk 信息，稍后批量处理
-        if not hasattr(self, "_pending_chunks"):
-            self._pending_chunks = {}
-
-        if file_id not in self._pending_chunks:
-            self._pending_chunks[file_id] = {"chunk_ids": [], "contents": [], "metadata": metadata or {}}
-
-        self._pending_chunks[file_id]["chunk_ids"].append(chunk_id)
-        self._pending_chunks[file_id]["contents"].append(content)
-
-        return None
 
     async def _on_search_hook(self, query: str, results: list, **kwargs):
         """搜索钩子"""

@@ -143,20 +143,6 @@ def process_and_commit_batch(
             "INSERT INTO fts5_index (rowid, content) VALUES (?, ?)", (new_chunk_id, prepare_fts_content(chunk, f_path))
         )
 
-    # 触发插件钩子: on_chunks_indexed
-    if plugin_loader and inserted_chunk_ids:
-        try:
-            for chunk_id, file_id, chunk, f_path in inserted_chunk_ids:
-                plugin_loader.invoke_hook(
-                    "on_chunks_indexed",
-                    chunk_id=chunk_id,
-                    file_id=file_id,
-                    content=chunk.content,
-                    metadata=chunk.metadata,
-                )
-        except Exception as e:
-            logger.warning(f"⚠️ 插件钩子执行失败: {e}")
-
     if commit:
         db.conn.commit()
     return start_idx + len(chunks)
