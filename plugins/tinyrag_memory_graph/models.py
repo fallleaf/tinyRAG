@@ -9,18 +9,35 @@ import json
 import time
 from dataclasses import dataclass, field
 from datetime import date, datetime
-from typing import Optional
+from typing import Any, Optional
 
 
-def _json_serialize(obj):
-    """JSON 序列化辅助函数，处理 date/datetime"""
+def _json_serialize(obj: Any) -> str:
+    """JSON 序列化辅助函数，处理 date/datetime。
+    
+    Args:
+        obj: 需要序列化的对象
+        
+    Returns:
+        ISO 格式的日期时间字符串
+        
+    Raises:
+        TypeError: 如果对象类型不支持序列化
+    """
     if isinstance(obj, (datetime, date)):
         return obj.isoformat()
     raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
 
-def _ensure_json_serializable(data):
-    """确保数据可 JSON 序列化"""
+def _ensure_json_serializable(data: Any) -> Any:
+    """确保数据可 JSON 序列化。
+    
+    Args:
+        data: 需要检查的数据（支持 dict, list, datetime, date）
+        
+    Returns:
+        可 JSON 序列化的数据副本
+    """
     if isinstance(data, dict):
         return {k: _ensure_json_serializable(v) for k, v in data.items()}
     elif isinstance(data, list):

@@ -177,11 +177,24 @@ class PluginLoader:
     def _load_plugin_configs(self) -> None:
         """从配置中加载插件配置项"""
         # 从全局配置中获取 plugins 配置
+        # Settings.plugins 是 PluginsConfig 类型
+        # PluginsConfig.plugins 是 list[PluginConfig] 类型
         if hasattr(self.config, "plugins"):
-            for plugin_cfg in self.config.plugins:
-                name = plugin_cfg.get("name") if isinstance(plugin_cfg, dict) else getattr(plugin_cfg, "name", None)
-                if name:
-                    self._plugin_configs[name] = plugin_cfg if isinstance(plugin_cfg, dict) else plugin_cfg.__dict__
+            plugins_config = self.config.plugins
+            # 兼容两种情况：PluginsConfig 对象或直接列表
+            plugin_list = None
+            if hasattr(plugins_config, "plugins"):
+                # 标准：Settings.plugins -> PluginsConfig.plugins -> list[PluginConfig]
+                plugin_list = plugins_config.plugins
+            elif isinstance(plugins_config, list):
+                # 兼容：直接是列表
+                plugin_list = plugins_config
+            
+            if plugin_list:
+                for plugin_cfg in plugin_list:
+                    name = plugin_cfg.get("name") if isinstance(plugin_cfg, dict) else getattr(plugin_cfg, "name", None)
+                    if name:
+                        self._plugin_configs[name] = plugin_cfg if isinstance(plugin_cfg, dict) else plugin_cfg.__dict__
 
     def discover_plugins(self) -> list[PluginInfo]:
         """

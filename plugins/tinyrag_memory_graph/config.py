@@ -13,6 +13,38 @@ import yaml
 
 
 @dataclass
+class LLMConfig:
+    """LLM 模型配置"""
+
+    # 模型文件名（相对于 ~/.cache/llama.cpp/）或绝对路径
+    model_path: str = "qwen1_5-0_5b-chat-q4_k_m.gguf"
+    # 上下文窗口大小
+    n_ctx: int = 2048
+    # CPU 线程数
+    n_threads: int = 4
+    # GPU 层数（0=纯CPU, -1=全部GPU, N=前N层GPU）
+    n_gpu_layers: int = 0
+    # 生成温度
+    temperature: float = 0.1
+    # 最大生成 Token 数
+    max_tokens: int = 512
+    # 批处理大小
+    n_batch: int = 512
+    # 是否启用详细日志
+    verbose: bool = False
+    # 默认模型缓存目录
+    cache_dir: str = "~/.cache/llama.cpp"
+
+    def get_model_full_path(self) -> Path:
+        """获取模型完整路径"""
+        path = Path(self.model_path)
+        if path.is_absolute():
+            return path
+        # 相对路径：拼接到缓存目录
+        return Path(self.cache_dir).expanduser() / self.model_path
+
+
+@dataclass
 class ExtractionConfig:
     """实体/关系抽取配置"""
 
@@ -114,6 +146,7 @@ class MemoryGraphConfig:
     version: str = "1.0.0"
 
     # 子配置
+    llm: LLMConfig = field(default_factory=LLMConfig)
     extraction: ExtractionConfig = field(default_factory=ExtractionConfig)
     retrieval: RetrievalConfig = field(default_factory=RetrievalConfig)
     memify: MemifyConfig = field(default_factory=MemifyConfig)
@@ -126,6 +159,7 @@ class MemoryGraphConfig:
         if not data:
             return cls()
 
+        llm_data = data.get("llm", {})
         extraction_data = data.get("extraction", {})
         retrieval_data = data.get("retrieval", {})
         memify_data = data.get("memify", {})
@@ -133,7 +167,6 @@ class MemoryGraphConfig:
         metrics_data = data.get("metrics", {})
 
         # 兼容顶层配置（简化配置格式）
-        top_level_overrides = {}
         simple_keys = {
             "extract_chunk_mode": ("extraction", "chunk_mode"),
             "llm_max_latency_ms": ("extraction", "llm_max_latency_ms"),
@@ -158,6 +191,17 @@ class MemoryGraphConfig:
             enabled=data.get("enabled", True),
             name=data.get("name", "memory-graph"),
             version=data.get("version", "1.0.0"),
+            llm=LLMConfig(
+                model_path=llm_data.get("model_path", "qwen1_5-0_5b-chat-q4_k_m.gguf"),
+                n_ctx=llm_data.get("n_ctx", 2048),
+                n_threads=llm_data.get("n_threads", 4),
+                n_gpu_layers=llm_data.get("n_gpu_layers", 0),
+                temperature=llm_data.get("temperature", 0.1),
+                max_tokens=llm_data.get("max_tokens", 512),
+                n_batch=llm_data.get("n_batch", 512),
+                verbose=llm_data.get("verbose", False),
+                cache_dir=llm_data.get("cache_dir", "~/.cache/llama.cpp"),
+            ),
             extraction=ExtractionConfig(
                 chunk_mode=extraction_data.get("chunk_mode", "spacy"),
                 llm_max_latency_ms=extraction_data.get("llm_max_latency_ms", 500),
@@ -171,10 +215,10 @@ class MemoryGraphConfig:
                 max_hops=retrieval_data.get("max_hops", 2),
                 min_edge_weight=retrieval_data.get("min_edge_weight", 0.4),
                 max_traverse_nodes=retrieval_data.get("max_traverse_nodes", 50),
-                # 修复问题2：兼容 config.yaml 的 vector_weight/graph_weight 命名
-                alpha=retrieval_data.get("alpha", retrieval_data.get("vector_weight", 1.0)),  # 基础分数保留系数
-                beta=retrieval_data.get("beta", retrieval_data.get("graph_weight", 0.15)),  # 图谱增强权重
-                gamma=retrieval_data.get("gamma", 0.1),  # 偏好加成权重
+                # 兼容 config.yaml 的 vector_weight/graph_weight 命名
+                alpha=retrieval_data.get("alpha", retrieval_data.get("vector_weight", 1.0)),
+                beta=retrieval_data.get("beta", retrieval_data.get("graph_weight", 0.15)),
+                gamma=retrieval_data.get("gamma", 0.1),
                 max_context_tokens=retrieval_data.get("max_context_tokens", 3500),
             ),
             memify=MemifyConfig(
@@ -225,6 +269,17 @@ class MemoryGraphConfig:
             "enabled": self.enabled,
             "name": self.name,
             "version": self.version,
+            "llm": {
+                "model_path": self.llm.model_path,
+                "n_ctx": self.llm.n_ctx,
+                "n_threads": self.llm.n_threads,
+                "n_gpu_layers": self.llm.n_gpu_layers,
+                "temperature": self.llm.temperature,
+                "max_tokens": self.llm.max_tokens,
+                "n_batch": self.llm.n_batch,
+                "verbose": self.llm.verbose,
+                "cache_dir": self.llm.cache_dir,
+            },
             "extraction": {
                 "chunk_mode": self.extraction.chunk_mode,
                 "llm_max_latency_ms": self.extraction.llm_max_latency_ms,
@@ -269,6 +324,7 @@ class MemoryGraphConfig:
 
 
 __all__ = [
+    "LLMConfig",
     "ExtractionConfig",
     "MemifyConfig",
     "MemoryGraphConfig",

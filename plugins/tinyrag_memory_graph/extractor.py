@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 
 from loguru import logger
 
-from plugins.tinyrag_memory_graph.config import ExtractionConfig, MemoryGraphConfig
+from plugins.tinyrag_memory_graph.config import ExtractionConfig, LLMConfig, MemoryGraphConfig
 from plugins.tinyrag_memory_graph.models import Entity, EntityType, Relation, RelationType
 
 
@@ -58,8 +58,9 @@ class FrontmatterParser:
             import yaml
 
             return yaml.safe_load(yaml_content) or {}
-        except Exception:
-            # 简单解析作为后备
+        except Exception as e:
+            # YAML 解析失败，使用简单解析作为后备
+            logger.debug(f"[FrontmatterParser] YAML parse failed, fallback to simple parse: {e}")
             return cls._simple_parse(yaml_content)
 
     @classmethod
@@ -186,7 +187,7 @@ class NLPExtractor:
 
             self._initialized = True
         except Exception as e:
-            logger.info(f"[NLPExtractor] Failed to load spaCy model: {e}")
+            logger.warning(f"[NLPExtractor] Failed to load spaCy model: {e}")
             self._nlp = None
             self._initialized = True
 
@@ -219,7 +220,8 @@ class NLPExtractor:
                 )
                 entities.append(entity)
         except Exception as e:
-            logger.info(f"[NLPExtractor] Error extracting entities: {e}")
+            logger.warning(f"[NLPExtractor] Error extracting entities: {e}")
+            # 返回已提取的实体，不中断流程
 
         return self._deduplicate_entities(entities)
 
@@ -291,8 +293,10 @@ class RuleExtractor:
                     custom = json.load(f)
                     for pattern, entity_type in custom.get("patterns", {}).items():
                         self.patterns[pattern] = entity_type
+            except FileNotFoundError:
+                logger.warning(f"[RuleExtractor] Custom dict file not found: {self.config.rule_dict_path}")
             except Exception as e:
-                logger.info(f"[RuleExtractor] Failed to load custom dict: {e}")
+                logger.warning(f"[RuleExtractor] Failed to load custom dict: {e}")
 
     def extract_entities(self, text: str) -> list[Entity]:
         """从文本中抽取实体"""
@@ -310,7 +314,11 @@ class RuleExtractor:
                         source="rule",
                     )
                     entities.append(entity)
-            except Exception:
+            except re.error as e:
+                logger.warning(f"[RuleExtractor] Invalid regex pattern '{pattern}': {e}")
+                continue
+            except Exception as e:
+                logger.debug(f"[RuleExtractor] Pattern matching error for '{pattern}': {e}")
                 continue
 
         return self._deduplicate_entities(entities)
@@ -329,110 +337,218 @@ class LLMExtractor:
     基于 LLM 的实体/关系抽取器
 
     用于处理复杂文本或 NLP 失败时的后备方案。
+    支持 llama-cpp-python 加载 GGUF 量化模型。
     """
 
-    def __init__(self, config: ExtractionConfig):
-        self.config = config
-        self._llm = None
+    def __init__(self, config: ExtractionConfig, llm_config: LLMConfig | None = None):
+        """
+        初始化 LLM 抽取器
 
-    def extract_entities(self, text: str) -> tuple[list[Entity], list[Relation]]:
-        """使用 LLM 抽取实体和关系"""
-        # 检查是否有可用的 LLM
+        Args:
+            config: 抽取配置（包含超时等参数）
+            llm_config: LLM 模型配置（包含模型路径、参数等）
+        """
+        self.config = config
+        self.llm_config = llm_config or LLMConfig()
+        self._llm = None
+        self._model_loaded = False
+
+    def _load_llm(self):
+        """加载 LLM 模型"""
+        if self._model_loaded:
+            return
+
         try:
             import llama_cpp
 
-            if self._llm is None:
-                # 尝试加载量化模型
-                model_path = self._find_llm_model()
-                if model_path:
-                    self._llm = llama_cpp.Llama(model_path=str(model_path), n_ctx=2048, n_threads=4, verbose=False)
+            model_path = self._find_llm_model()
+            if model_path:
+                logger.info(f"[LLMExtractor] Loading model from: {model_path}")
+                self._llm = llama_cpp.Llama(
+                    model_path=str(model_path),
+                    n_ctx=self.llm_config.n_ctx,
+                    n_threads=self.llm_config.n_threads,
+                    n_gpu_layers=self.llm_config.n_gpu_layers,
+                    n_batch=self.llm_config.n_batch,
+                    verbose=self.llm_config.verbose,
+                )
+                logger.info("[LLMExtractor] Model loaded successfully")
+            else:
+                logger.warning("[LLMExtractor] No LLM model found")
         except ImportError:
-            return [], []
+            logger.warning("[LLMExtractor] llama-cpp-python not installed, LLM extraction disabled")
+        except Exception as e:
+            logger.warning(f"[LLMExtractor] Failed to load LLM model: {e}")
+        finally:
+            self._model_loaded = True
+
+    def extract_entities(self, text: str) -> tuple[list[Entity], list[Relation]]:
+        """使用 LLM 抽取实体和关系"""
+        import json
+
+        # 加载模型（延迟加载）
+        self._load_llm()
 
         if not self._llm:
             return [], []
 
-        # 构造提示词
-        prompt = f"""请从以下文本中抽取实体和关系，以 JSON 格式返回。
+        # 使用 ChatML 格式 (Qwen/通义专用格式) + Few-shot 示例
+        # 限制文本长度，避免超出上下文
+        truncated_text = text[:1000] if len(text) > 1000 else text
 
-文本：
-{text[:2000]}
-
-请返回 JSON 格式：
-{{"entities": [{{"name": "实体名", "type": "类型"}}], "relations": [{{"src": "实体1", "tgt": "实体2", "type": "关系类型"}}]}}
-
-JSON:"""
+        prompt = f"""<|im_start|>system
+从文本抽取人名、地点、组织、技术等实体。返回JSON格式: {{"entities":[{{"name":"实体名","type":"类型"}}]}}
+类型可以是: PERSON(人名), LOCATION(地点), ORG(组织), TECH(技术/概念)
+<|im_end|>
+<|im_start|>user
+抽取实体: 李明在上海阿里巴巴工作，研究深度学习。
+<|im_end|>
+<|im_start|>assistant
+{{"entities":[{{"name":"李明","type":"PERSON"}},{{"name":"上海","type":"LOCATION"}},{{"name":"阿里巴巴","type":"ORG"}},{{"name":"深度学习","type":"TECH"}}]}}
+<|im_end|>
+<|im_start|>user
+抽取实体: {truncated_text}
+<|im_end|>
+<|im_start|>assistant
+"""
 
         try:
-            # 设置超时
             import signal
 
             def timeout_handler(signum, frame):
                 raise TimeoutError("LLM extraction timeout")
 
             # 仅在 Unix 系统上使用 signal
-            import os
-
             if hasattr(signal, "SIGALRM"):
                 signal.signal(signal.SIGALRM, timeout_handler)
                 signal.alarm(self.config.llm_max_latency_ms // 1000 + 1)
 
             try:
-                response = self._llm(prompt, max_tokens=512, temperature=0.1, stop=["}"])
+                response = self._llm(
+                    prompt,
+                    max_tokens=self.llm_config.max_tokens,
+                    temperature=self.llm_config.temperature,
+                    # 不使用 stop，让模型完整输出
+                )
             finally:
                 if hasattr(signal, "SIGALRM"):
                     signal.alarm(0)
 
             # 解析响应
             text_response = response["choices"][0]["text"]
-            json_str = text_response + "}"  # 补全 JSON
 
-            # 尝试找到 JSON 部分
-            import json
+            # 使用正则提取 JSON - 更健壮的解析方式
+            data = self._parse_json_response(text_response)
 
-            start = json_str.find("{")
-            if start >= 0:
-                data = json.loads(json_str[start:])
-
+            if data:
                 entities = []
                 for e in data.get("entities", []):
-                    entities.append(
-                        Entity(
-                            id=hashlib.md5(f"{e['type']}:{e['name']}".encode()).hexdigest()[:16],
-                            canonical_name=e["name"],
-                            type=e.get("type", "UNKNOWN"),
-                            confidence=0.7,
-                            source="llm",
+                    if isinstance(e, dict) and "name" in e:
+                        entities.append(
+                            Entity(
+                                id=hashlib.md5(f"{e.get('type', 'UNKNOWN')}:{e['name']}".encode()).hexdigest()[:16],
+                                canonical_name=e["name"],
+                                type=e.get("type", "UNKNOWN"),
+                                confidence=0.7,
+                                source="llm",
+                            )
                         )
-                    )
 
                 return entities, []  # 关系抽取需要更复杂的处理
 
-        except (TimeoutError, json.JSONDecodeError, Exception) as e:
-            logger.info(f"[LLMExtractor] Error: {e}")
+        except TimeoutError:
+            logger.warning("[LLMExtractor] Extraction timeout")
+        except Exception as e:
+            logger.warning(f"[LLMExtractor] Error: {e}")
 
         return [], []
 
+    def _parse_json_response(self, text: str) -> dict | None:
+        """解析 LLM 响应中的 JSON，使用多种策略提取"""
+        import json
+        import re
+
+        # 策略1: 直接解析整个响应
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            pass
+
+        # 策略2: 查找第一个完整的 JSON 对象
+        # 匹配 {...} 模式，处理嵌套括号
+        brace_count = 0
+        start = text.find("{")
+        if start >= 0:
+            for i, c in enumerate(text[start:], start):
+                if c == "{":
+                    brace_count += 1
+                elif c == "}":
+                    brace_count -= 1
+                    if brace_count == 0:
+                        try:
+                            return json.loads(text[start : i + 1])
+                        except json.JSONDecodeError:
+                            break
+
+        # 策略3: 使用正则提取 entities 数组
+        entities_match = re.search(r'"entities"\s*:\s*\[(.*?)\]', text, re.DOTALL)
+        if entities_match:
+            try:
+                # 尝试解析为数组
+                entities_str = "[" + entities_match.group(1) + "]"
+                entities = json.loads(entities_str)
+                return {"entities": entities}
+            except json.JSONDecodeError:
+                pass
+
+        # 策略4: 提取所有 name-type 对
+        entities = []
+        name_pattern = re.compile(r'"name"\s*:\s*"([^"]+)"')
+        type_pattern = re.compile(r'"type"\s*:\s*"([^"]+)"')
+
+        # 查找所有 {...} 块
+        for match in re.finditer(r'\{[^{}]*"name"[^{}]*\}', text):
+            block = match.group()
+            name_match = name_pattern.search(block)
+            type_match = type_pattern.search(block)
+            if name_match:
+                entities.append({
+                    "name": name_match.group(1),
+                    "type": type_match.group(1) if type_match else "UNKNOWN"
+                })
+
+        if entities:
+            return {"entities": entities}
+
+        return None
+
     def _find_llm_model(self):
         """查找 LLM 模型文件"""
-        candidates = [
-            "~/.cache/llama.cpp/qwen1.5-0.5b-chat-q4_k_m.gguf",
-            "~/.cache/llama.cpp/qwen-1.8b-chat-q4_k_m.gguf",
-            "/models/llm/*.gguf",
-        ]
-
         from pathlib import Path
+
+        # 优先使用配置中的路径
+        config_path = self.llm_config.get_model_full_path()
+        if config_path.exists():
+            return config_path
+
+        # 后备候选路径
+        candidates = [
+            "~/.cache/llama.cpp/qwen1_5-0_5b-chat-q4_k_m.gguf",  # 新文件名格式
+            "~/.cache/llama.cpp/qwen1.5-0.5b-chat-q4_k_m.gguf",  # 旧文件名格式
+            "~/.cache/llama.cpp/qwen-1.8b-chat-q4_k_m.gguf",
+        ]
 
         for pattern in candidates:
             expanded = Path(pattern).expanduser()
             if expanded.exists():
                 return expanded
-            # 尝试 glob
-            parent = expanded.parent
-            if parent.exists():
-                matches = list(parent.glob(expanded.name.replace("*", "*")))
-                if matches:
-                    return matches[0]
+
+        # 尝试在缓存目录中搜索任何 .gguf 文件
+        cache_dir = Path(self.llm_config.cache_dir).expanduser()
+        if cache_dir.exists():
+            gguf_files = list(cache_dir.glob("*.gguf"))
+            if gguf_files:
+                return gguf_files[0]
 
         return None
 
@@ -449,12 +565,19 @@ class DualLayerExtractor:
         self.extraction_config = config.extraction
 
         # 初始化抽取器
+        # rule 模式：仅规则
+        # spacy 模式：规则 + spaCy
+        # llm_fallback 模式：规则 + spaCy + LLM 后备（完整流水线）
         self.nlp_extractor = (
-            NLPExtractor(self.extraction_config) if self.extraction_config.chunk_mode == "spacy" else None
+            NLPExtractor(self.extraction_config)
+            if self.extraction_config.chunk_mode in ("spacy", "llm_fallback")
+            else None
         )
         self.rule_extractor = RuleExtractor(self.extraction_config)
         self.llm_extractor = (
-            LLMExtractor(self.extraction_config) if self.extraction_config.chunk_mode == "llm_fallback" else None
+            LLMExtractor(self.extraction_config, self.config.llm)
+            if self.extraction_config.chunk_mode == "llm_fallback"
+            else None
         )
 
     def _ensure_json_serializable(self, data: dict) -> dict:
@@ -566,9 +689,9 @@ class DualLayerExtractor:
                 if "interpreter shutdown" in str(e):
                     pass
                 else:
-                    logger.info(f"[DualLayerExtractor] NLP extraction error: {e}")
+                    logger.warning(f"[DualLayerExtractor] NLP extraction error: {e}")
             except Exception as e:
-                logger.info(f"[DualLayerExtractor] NLP extraction error: {e}")
+                logger.warning(f"[DualLayerExtractor] NLP extraction error: {e}")
 
         # 3. 去重
         result.entities = self._deduplicate_entities(result.entities)
@@ -578,8 +701,9 @@ class DualLayerExtractor:
             try:
                 llm_entities, _ = self.llm_extractor.extract_entities(chunk_content)
                 result.entities.extend(llm_entities)
-            except Exception:
-                pass  # 静默降级
+            except Exception as e:
+                # LLM 后备失败不影响主流程，记录调试日志
+                logger.debug(f"[DualLayerExtractor] LLM fallback extraction error: {e}")
 
         result.processing_time_ms = (time.time() - start_time) * 1000
         return result

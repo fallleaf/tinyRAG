@@ -9,6 +9,7 @@ storage.py - 图谱存储层
 - 图遍历查询
 """
 
+import array
 import sqlite3
 import time
 from pathlib import Path
@@ -62,12 +63,12 @@ class GraphStorage:
                 self.conn.executescript(sql_script)
                 logger.info(f"[GraphStorage] ✅ Schema 脚本执行成功: {schema_path}")
             except Exception as e:
-                logger.info(f"[GraphStorage] ❌ Schema 脚本执行失败: {e}")
+                logger.error(f"[GraphStorage] ❌ Schema 脚本执行失败: {e}")
                 import traceback
 
                 traceback.print_exc()
         else:
-            logger.info(f"[GraphStorage] ⚠️ Schema 文件不存在: {schema_path}")
+            logger.warning(f"[GraphStorage] ⚠️ Schema 文件不存在: {schema_path}")
 
         # 2. 检查并添加 chunks 表扩展列
         self._ensure_chunk_columns()
@@ -107,11 +108,11 @@ class GraphStorage:
                 except sqlite3.OperationalError as e:
                     # 列可能已存在，静默忽略
                     if "duplicate column" not in str(e).lower():
-                        logger.info(f"[GraphStorage] ⚠️ 添加列失败 {col_name}: {e}")
+                        logger.warning(f"[GraphStorage] ⚠️ 添加列失败 {col_name}: {e}")
                     # else: 列已存在，忽略
                 except Exception as e:
                     if "duplicate column" not in str(e).lower():
-                        logger.info(f"[GraphStorage] ⚠️ 添加列异常 {col_name}: {e}")
+                        logger.warning(f"[GraphStorage] ⚠️ 添加列异常 {col_name}: {e}")
 
         if added_any:
             self.conn.commit()
@@ -133,7 +134,7 @@ class GraphStorage:
             )
             return True
         except Exception as e:
-            logger.info(f"[GraphStorage] upsert_note error: {e}")
+            logger.error(f"[GraphStorage] upsert_note error: {e}")
             return False
 
     def get_note(self, note_id: str) -> Optional[Note]:
@@ -162,7 +163,7 @@ class GraphStorage:
             self.conn.execute("DELETE FROM notes WHERE note_id = ?", (note_id,))
             return True
         except Exception as e:
-            logger.info(f"[GraphStorage] delete_note error: {e}")
+            logger.error(f"[GraphStorage] delete_note error: {e}")
             return False
 
     # ==================== Entity 操作 ====================
@@ -186,8 +187,46 @@ class GraphStorage:
             # 如果是数据库关闭导致的错误，静默返回
             if "closed database" in str(e) or "Cannot operate" in str(e):
                 return False
-            logger.info(f"[GraphStorage] upsert_entity error: {e}")
+            logger.error(f"[GraphStorage] upsert_entity error: {e}")
             return False
+
+    def upsert_entities_batch(self, entities: list[Entity]) -> int:
+        """批量插入或更新实体（性能优化版）
+        
+        Args:
+            entities: 实体列表
+            
+        Returns:
+            成功写入的数量
+        """
+        if not entities:
+            return 0
+        
+        success_count = 0
+        try:
+            # 使用 executemany 批量操作
+            rows = [e.to_db_row() for e in entities]
+            self.conn.executemany(
+                """INSERT INTO entities (id, canonical_name, type, confidence, source)
+                   VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT(id) DO UPDATE SET
+                       canonical_name = excluded.canonical_name,
+                       type = excluded.type,
+                       confidence = MAX(confidence, excluded.confidence),
+                       source = excluded.source,
+                       updated_at = strftime('%s', 'now')""",
+                rows,
+            )
+            success_count = len(entities)
+        except Exception as e:
+            if "closed database" not in str(e) and "Cannot operate" not in str(e):
+                logger.error(f"[GraphStorage] upsert_entities_batch error: {e}")
+            # 降级为逐条插入
+            for entity in entities:
+                if self.upsert_entity(entity):
+                    success_count += 1
+        
+        return success_count
 
     def get_entity(self, entity_id: str) -> Optional[Entity]:
         """获取实体"""
@@ -216,8 +255,45 @@ class GraphStorage:
             )
             return True
         except Exception as e:
-            logger.info(f"[GraphStorage] upsert_relation error: {e}")
+            logger.error(f"[GraphStorage] upsert_relation error: {e}")
             return False
+
+    def upsert_relations_batch(self, relations: list[Relation]) -> int:
+        """批量插入或更新关系（性能优化版）
+        
+        Args:
+            relations: 关系列表
+            
+        Returns:
+            成功写入的数量
+        """
+        if not relations:
+            return 0
+        
+        success_count = 0
+        try:
+            # 使用 executemany 批量操作
+            rows = [r.to_db_row() for r in relations]
+            self.conn.executemany(
+                """INSERT INTO relations (src_chunk_id, tgt_chunk_id, rel_type, scope, weight, evidence_chunk_id, last_hit)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(src_chunk_id, tgt_chunk_id, rel_type) DO UPDATE SET
+                       scope = excluded.scope,
+                       weight = MAX(weight, excluded.weight),
+                       evidence_chunk_id = COALESCE(excluded.evidence_chunk_id, evidence_chunk_id),
+                       updated_at = strftime('%s', 'now')""",
+                rows,
+            )
+            success_count = len(relations)
+        except Exception as e:
+            if "closed database" not in str(e) and "Cannot operate" not in str(e):
+                logger.error(f"[GraphStorage] upsert_relations_batch error: {e}")
+            # 降级为逐条插入
+            for relation in relations:
+                if self.upsert_relation(relation):
+                    success_count += 1
+        
+        return success_count
 
     def get_relations_from(self, chunk_id: int, min_weight: float = 0.0) -> list[Relation]:
         """获取从某 Chunk 出发的关系"""
@@ -248,7 +324,7 @@ class GraphStorage:
             )
             return True
         except Exception as e:
-            logger.info(f"[GraphStorage] touch_relation error: {e}")
+            logger.error(f"[GraphStorage] touch_relation error: {e}")
             return False
 
     def boost_relation(
@@ -265,7 +341,7 @@ class GraphStorage:
             )
             return True
         except Exception as e:
-            logger.info(f"[GraphStorage] boost_relation error: {e}")
+            logger.error(f"[GraphStorage] boost_relation error: {e}")
             return False
 
     def decay_old_relations(self, days: int, factor: float, min_weight: float = 0.1) -> int:
@@ -281,7 +357,7 @@ class GraphStorage:
             )
             return cursor.rowcount
         except Exception as e:
-            logger.info(f"[GraphStorage] decay_old_relations error: {e}")
+            logger.error(f"[GraphStorage] decay_old_relations error: {e}")
             return 0
 
     # ==================== 图遍历 ====================
@@ -336,7 +412,7 @@ class GraphStorage:
             rows = self.conn.execute(query, (min_weight, max_hops, min_weight, max_nodes)).fetchall()
             return [dict(r) for r in rows]
         except Exception as e:
-            logger.info(f"[GraphStorage] traverse_graph error: {e}")
+            logger.error(f"[GraphStorage] traverse_graph error: {e}")
             return []
 
     # ==================== Chunk 扩展操作 ====================
@@ -370,7 +446,7 @@ class GraphStorage:
                     continue
                 else:
                     if "closed database" not in error_msg and "cannot operate" not in error_msg:
-                        logger.info(f"[GraphStorage] update_chunk_meta error: {e}")
+                        logger.error(f"[GraphStorage] update_chunk_meta error: {e}")
                     return False
             except Exception as e:
                 # 静默处理数据库关闭错误
@@ -383,7 +459,7 @@ class GraphStorage:
 
                     _time.sleep(0.1 * (attempt + 1))
                     continue
-                logger.info(f"[GraphStorage] update_chunk_meta error: {e}")
+                logger.error(f"[GraphStorage] update_chunk_meta error: {e}")
                 return False
         return False
 
@@ -401,7 +477,7 @@ class GraphStorage:
             self.conn.execute("UPDATE chunks SET is_representative = 1, note_id = ? WHERE id = ?", (note_id, chunk_id))
             return True
         except Exception as e:
-            logger.info(f"[GraphStorage] set_representative_chunk error: {e}")
+            logger.error(f"[GraphStorage] set_representative_chunk error: {e}")
             return False
 
     def get_note_id_by_chunk(self, chunk_id: int) -> Optional[str]:
@@ -410,22 +486,30 @@ class GraphStorage:
             row = self.conn.execute("SELECT note_id FROM chunks WHERE id = ?", (chunk_id,)).fetchone()
             return row[0] if row else None
         except Exception as e:
-            logger.info(f"[GraphStorage] get_note_id_by_chunk error: {e}")
+            logger.error(f"[GraphStorage] get_note_id_by_chunk error: {e}")
             return None
 
     def get_chunks_by_note(self, note_id: str) -> list[dict]:
-        """获取文档的所有 Chunk"""
+        """获取文档的所有 Chunk（包含 embedding）"""
         try:
+            # JOIN chunks 和 vectors 表获取 embedding
+            # vectors 是 sqlite-vec 的虚拟表，embedding 以 blob 格式存储
             rows = self.conn.execute(
-                "SELECT id, content, embedding FROM chunks WHERE note_id = ?", (note_id,)
+                """SELECT c.id, c.content, v.embedding
+                   FROM chunks c
+                   LEFT JOIN vectors v ON c.id = v.chunk_id
+                   WHERE c.note_id = ?""",
+                (note_id,),
             ).fetchall()
 
             chunks = []
             for row in rows:
-                chunks.append({"id": row[0], "content": row[1], "embedding": json.loads(row[2]) if row[2] else []})
+                # sqlite-vec 存储的 embedding 是二进制 blob 格式，需用 array 解析
+                embedding = list(array.array("f", row[2])) if row[2] else []
+                chunks.append({"id": row[0], "content": row[1], "embedding": embedding})
             return chunks
         except Exception as e:
-            logger.info(f"[GraphStorage] get_chunks_by_note error: {e}")
+            logger.error(f"[GraphStorage] get_chunks_by_note error: {e}")
             return []
 
     # ==================== 任务管理 ====================
@@ -448,7 +532,7 @@ class GraphStorage:
             self.conn.commit()  # 确保提交
             return True
         except Exception as e:
-            logger.info(f"[GraphStorage] create_job error: {e}")
+            logger.error(f"[GraphStorage] create_job error: {e}")
             return False
 
     def get_pending_job(self) -> Optional[GraphBuildJob]:
@@ -491,7 +575,7 @@ class GraphStorage:
             # 静默处理数据库关闭错误
             if "closed database" in str(e) or "Cannot operate" in str(e):
                 return False
-            logger.info(f"[GraphStorage] update_job_status error: {e}")
+            logger.error(f"[GraphStorage] update_job_status error: {e}")
             return False
 
     def get_job_stats(self) -> dict:
@@ -516,7 +600,7 @@ class GraphStorage:
             )
             return True
         except Exception as e:
-            logger.info(f"[GraphStorage] record_tag_co_occurrence error: {e}")
+            logger.error(f"[GraphStorage] record_tag_co_occurrence error: {e}")
             return False
 
     def get_tag_co_occurrences(self, min_count: int = 3) -> list[dict]:

@@ -126,7 +126,7 @@ class MemoryGraphPlugin(PluginBase):
                 return True
             except Exception as e:
                 # 打印错误信息，便于调试
-                logger.info(f"[MemoryGraphPlugin] ❌ 初始化失败: {e}")
+                logger.error(f"[MemoryGraphPlugin] ❌ 初始化失败: {e}")
                 import traceback
 
                 traceback.print_exc()
@@ -141,7 +141,7 @@ class MemoryGraphPlugin(PluginBase):
                 try:
                     self._graph_builder.stop()
                 except Exception as e:
-                    logger.info(f"[MemoryGraphPlugin] ⚠️ 停止图谱构建器失败: {e}")
+                    logger.warning(f"[MemoryGraphPlugin] ⚠️ 停止图谱构建器失败: {e}")
 
             # 停止代谢引擎（同步方式）
             if self._memify_engine:
@@ -155,7 +155,7 @@ class MemoryGraphPlugin(PluginBase):
                     finally:
                         loop.close()
                 except Exception as e:
-                    logger.info(f"[MemoryGraphPlugin] ⚠️ 停止代谢引擎失败: {e}")
+                    logger.warning(f"[MemoryGraphPlugin] ⚠️ 停止代谢引擎失败: {e}")
 
             self._started = False
 
@@ -210,7 +210,7 @@ class MemoryGraphPlugin(PluginBase):
             try:
                 self._initialize_sync()
             except Exception as e:
-                logger.info(f"[MemoryGraphPlugin] ⚠️ 初始化失败，跳过清理: {e}")
+                logger.warning(f"[MemoryGraphPlugin] ⚠️ 初始化失败，跳过清理: {e}")
                 return None
 
         try:
@@ -239,7 +239,7 @@ class MemoryGraphPlugin(PluginBase):
             logger.info("[MemoryGraphPlugin] 🧹 索引重建，已清理图谱数据")
             return {"cleaned": True}
         except Exception as e:
-            logger.info(f"[MemoryGraphPlugin] ❌ 清理图谱数据失败: {e}")
+            logger.error(f"[MemoryGraphPlugin] ❌ 清理图谱数据失败: {e}")
             # 确保外键约束恢复
             try:
                 self._db.execute("PRAGMA foreign_keys = ON")
@@ -262,7 +262,7 @@ class MemoryGraphPlugin(PluginBase):
                 with open(file_to_read, "r", encoding="utf-8") as f:
                     full_content = f.read()
             except Exception as e:
-                logger.info(f"[MemoryGraphPlugin] ⚠️ 无法读取文件 {file_to_read}: {e}")
+                logger.warning(f"[MemoryGraphPlugin] ⚠️ 无法读取文件 {file_to_read}: {e}")
                 full_content = "\n".join(
                     [c.get("content", "") if isinstance(c, dict) else getattr(c, "content", "") for c in chunks]
                 )
@@ -342,7 +342,7 @@ class MemoryGraphPlugin(PluginBase):
                 self._initialize_sync()
                 logger.info("[MemoryGraphPlugin] ✅ 数据库连接已设置，Schema 初始化完成")
             except Exception as e:
-                logger.info(f"[MemoryGraphPlugin] ❌ 初始化失败: {e}")
+                logger.error(f"[MemoryGraphPlugin] ❌ 初始化失败: {e}")
                 import traceback
 
                 traceback.print_exc()
