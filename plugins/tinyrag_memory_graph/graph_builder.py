@@ -15,7 +15,6 @@ import sqlite3
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Optional
 
 from loguru import logger
 
@@ -53,9 +52,9 @@ class GraphBuildQueue:
         self.config = config
         self.queue_config = config.queue
 
-        self._executor: Optional[ThreadPoolExecutor] = None
+        self._executor: ThreadPoolExecutor | None = None
         self._running = False
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._loop: asyncio.AbstractEventLoop | None = None
 
         # 统计
         self._stats = {
@@ -90,7 +89,7 @@ class GraphBuildQueue:
         # 这些任务可能是上次程序异常退出时遗留的
         try:
             cursor = self.storage.conn.execute(
-                """UPDATE graph_build_jobs 
+                """UPDATE graph_build_jobs
                    SET status = 'pending', error_msg = 'Recovered from interrupted run'
                    WHERE status = 'running'"""
             )
@@ -137,23 +136,7 @@ class GraphBuildQueue:
             status="pending",
         )
 
-        # 立即提取 title 和 frontmatter，不等待后台任务
-        title = self._extract_title_from_content(task.content)
-        frontmatter = self._extract_frontmatter(task.content)
-
-        # 先创建 note 记录（因为 graph_build_jobs 有外键约束）
-        from plugins.tinyrag_memory_graph.models import Note
-
-        note = Note(
-            note_id=task.note_id,
-            filepath=task.filepath,
-            title=title or frontmatter.get("title", ""),
-            frontmatter_json=frontmatter if frontmatter else None,
-        )
-        self.storage.upsert_note(note)
-        self.storage.conn.commit()
-
-        # 写入任务表
+        # 写入任务表（Note 记录将在 _build_graph 中创建，避免重复写入）
         self.storage.create_job(job)
 
         # 判断执行模式：sync 参数优先，否则检查 executor 状态
@@ -232,82 +215,92 @@ class GraphBuildQueue:
         """
         stats = {"entities": 0, "relations": 0}
 
-        # 初始化抽取器（复用实例，避免重复加载模型）
-        extractor = DualLayerExtractor(self.config)
+        try:
+            # 初始化抽取器（复用实例，避免重复加载模型）
+            extractor = DualLayerExtractor(self.config)
 
-        # 1. 文档级抽取
-        doc_result = extractor.extract_document_level(task.content, task.note_id)
+            # 1. 文档级抽取
+            doc_result = extractor.extract_document_level(task.content, task.note_id)
 
-        # 2. 创建 Note 记录
-        note = Note(
-            note_id=task.note_id,
-            filepath=task.filepath,
-            title=doc_result.frontmatter.get("title", ""),
-            frontmatter_json=doc_result.frontmatter,
-        )
-        self.storage.upsert_note(note)
-
-        # 3. 批量写入文档级实体（性能优化）
-        if doc_result.entities:
-            stats["entities"] += self.storage.upsert_entities_batch(doc_result.entities)
-
-        # 4. 确定代表 Chunk（FR-1.4）
-        representative_chunk_id = self._find_representative_chunk(
-            task.chunk_ids, task.chunks_content, doc_result.wikilinks
-        )
-
-        # 5. 批量更新 Chunk 元数据
-        inherited_meta = {
-            "author": doc_result.frontmatter.get("author", ""),
-            "project": doc_result.frontmatter.get("project", ""),
-            "status": doc_result.frontmatter.get("status", ""),
-            "tags": doc_result.frontmatter.get("tags", []),
-        }
-
-        for i, chunk_id in enumerate(task.chunk_ids):
-            chunk_meta = ChunkMeta(
-                chunk_id=chunk_id,
+            # 2. 创建 Note 记录（统一在此处创建，避免重复写入）
+            note = Note(
                 note_id=task.note_id,
-                inherited_meta=inherited_meta,
-                is_representative=(chunk_id == representative_chunk_id),
+                filepath=task.filepath,
+                title=doc_result.frontmatter.get("title", ""),
+                frontmatter_json=doc_result.frontmatter,
             )
-            self.storage.update_chunk_meta(chunk_meta)
+            self.storage.upsert_note(note)
 
-        # 6. Chunk 级抽取（并行优化）
-        all_chunk_entities = []
-        
-        # 并行处理 chunks（如果配置了多线程）
-        if self.queue_config.max_workers > 1 and len(task.chunk_ids) > 3:
-            all_chunk_entities = self._extract_chunks_parallel(
-                extractor, task.chunk_ids, task.chunks_content, task.note_id
+            # 3. 批量写入文档级实体（性能优化）
+            if doc_result.entities:
+                stats["entities"] += self.storage.upsert_entities_batch(doc_result.entities)
+
+            # 4. 确定代表 Chunk（FR-1.4）
+            representative_chunk_id = self._find_representative_chunk(
+                task.chunk_ids, task.chunks_content, doc_result.wikilinks
             )
-        else:
-            # 串行处理（少量 chunks 时更快，避免线程开销）
-            for chunk_id, chunk_content in zip(task.chunk_ids, task.chunks_content):
-                chunk_result = extractor.extract_chunk_level(chunk_content, chunk_id, task.note_id)
-                all_chunk_entities.extend(chunk_result.entities)
 
-        # 批量写入 Chunk 级实体
-        if all_chunk_entities:
-            stats["entities"] += self.storage.upsert_entities_batch(all_chunk_entities)
+            # 5. 批量更新 Chunk 元数据
+            inherited_meta = {
+                "author": doc_result.frontmatter.get("author", ""),
+                "project": doc_result.frontmatter.get("project", ""),
+                "status": doc_result.frontmatter.get("status", ""),
+                "tags": doc_result.frontmatter.get("tags", []),
+            }
 
-        # 7. 创建 Wikilink 关系
-        wikilink_relations = self._create_wikilink_relations(task, doc_result.wikilinks, representative_chunk_id)
-        if wikilink_relations:
-            stats["relations"] += self.storage.upsert_relations_batch(wikilink_relations)
+            for i, chunk_id in enumerate(task.chunk_ids):
+                chunk_meta = ChunkMeta(
+                    chunk_id=chunk_id,
+                    note_id=task.note_id,
+                    inherited_meta=inherited_meta,
+                    is_representative=(chunk_id == representative_chunk_id),
+                )
+                self.storage.update_chunk_meta(chunk_meta)
 
-        # 8. 提交事务
-        self.storage.conn.commit()
+            # 6. Chunk 级抽取（并行优化）
+            all_chunk_entities = []
 
-        return stats
+            # 并行处理 chunks（如果配置了多线程）
+            if self.queue_config.max_workers > 1 and len(task.chunk_ids) > 3:
+                all_chunk_entities = self._extract_chunks_parallel(
+                    extractor, task.chunk_ids, task.chunks_content, task.note_id
+                )
+            else:
+                # 串行处理（少量 chunks 时更快，避免线程开销）
+                for chunk_id, chunk_content in zip(task.chunk_ids, task.chunks_content):
+                    chunk_result = extractor.extract_chunk_level(chunk_content, chunk_id, task.note_id)
+                    all_chunk_entities.extend(chunk_result.entities)
+
+            # 批量写入 Chunk 级实体
+            if all_chunk_entities:
+                stats["entities"] += self.storage.upsert_entities_batch(all_chunk_entities)
+
+            # 7. 创建 Wikilink 关系
+            wikilink_relations = self._create_wikilink_relations(task, doc_result.wikilinks, representative_chunk_id)
+            if wikilink_relations:
+                stats["relations"] += self.storage.upsert_relations_batch(wikilink_relations)
+
+            # 8. 提交事务（所有图谱数据在同一事务中提交）
+            self.storage.conn.commit()
+
+            return stats
+
+        except Exception as e:
+            # 发生错误时回滚事务
+            logger.error(f"[GraphBuildQueue] Graph build failed for {task.note_id}: {e}")
+            try:
+                self.storage.conn.rollback()
+            except Exception as rollback_error:
+                logger.warning(f"[GraphBuildQueue] Rollback failed: {rollback_error}")
+            raise
 
     def _extract_chunks_parallel(
-        self, extractor: DualLayerExtractor, chunk_ids: list[int], 
+        self, extractor: DualLayerExtractor, chunk_ids: list[int],
         chunks_content: list[str], note_id: str
     ) -> list:
         """并行提取多个 chunk 的实体"""
         all_entities = []
-        
+
         def extract_single(args):
             chunk_id, chunk_content = args
             try:
@@ -316,13 +309,13 @@ class GraphBuildQueue:
             except Exception as e:
                 logger.warning(f"[GraphBuildQueue] Chunk {chunk_id} extraction failed: {e}")
                 return []
-        
+
         # 使用线程池并行处理
         with ThreadPoolExecutor(max_workers=min(self.queue_config.max_workers, len(chunk_ids))) as executor:
             results = list(executor.map(extract_single, zip(chunk_ids, chunks_content)))
             for entities in results:
                 all_entities.extend(entities)
-        
+
         return all_entities
 
     def _find_representative_chunk(self, chunk_ids: list[int], chunks_content: list[str], wikilinks: list[str]) -> int:
@@ -478,4 +471,4 @@ class GraphBuilder:
         return self.queue.get_stats()
 
 
-__all__ = ["GraphBuildQueue", "GraphBuilder", "BuildTask"]
+__all__ = ["BuildTask", "GraphBuildQueue", "GraphBuilder"]
