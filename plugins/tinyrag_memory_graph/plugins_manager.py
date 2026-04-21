@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-
 from loguru import logger
 
 from plugins.tinyrag_memory_graph.hooks import HookContext, HookResult, HookType

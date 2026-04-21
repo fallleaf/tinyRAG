@@ -9,18 +9,18 @@ import json
 import time
 from dataclasses import dataclass, field
 from datetime import date, datetime
-from typing import Any, Optional
+from typing import Any
 
 
 def _json_serialize(obj: Any) -> str:
     """JSON 序列化辅助函数，处理 date/datetime。
-    
+
     Args:
         obj: 需要序列化的对象
-        
+
     Returns:
         ISO 格式的日期时间字符串
-        
+
     Raises:
         TypeError: 如果对象类型不支持序列化
     """
@@ -31,10 +31,10 @@ def _json_serialize(obj: Any) -> str:
 
 def _ensure_json_serializable(data: Any) -> Any:
     """确保数据可 JSON 序列化。
-    
+
     Args:
         data: 需要检查的数据（支持 dict, list, datetime, date）
-        
+
     Returns:
         可 JSON 序列化的数据副本
     """
@@ -122,6 +122,7 @@ class Entity:
     type: str = "UNKNOWN"  # 实体类型 (PERSON, ORG, LOC, MISC, CONCEPT)
     confidence: float = 1.0  # 置信度
     source: str = "nlp"  # 来源 (nlp / llm / rule)
+    chunk_id: str | None = None  # 所属 Chunk ID（用于图谱遍历）
 
     def to_db_row(self) -> tuple:
         """转换为数据库行"""
@@ -131,6 +132,7 @@ class Entity:
             self.type,
             self.confidence,
             self.source,
+            self.chunk_id,
         )
 
     @classmethod
@@ -142,6 +144,7 @@ class Entity:
             type=row.get("type", "UNKNOWN"),
             confidence=row.get("confidence", 1.0),
             source=row.get("source", "nlp"),
+            chunk_id=row.get("chunk_id"),
         )
 
 
@@ -158,8 +161,8 @@ class Relation:
     rel_type: str  # 关系类型 (LINKS_TO, MENTIONS, RELATED_TO, etc.)
     scope: str = "chunk"  # 作用域 (doc / chunk)
     weight: float = 0.8  # 关系权重
-    evidence_chunk_id: Optional[int] = None  # 证据 Chunk ID
-    last_hit: Optional[int] = None  # 最后访问时间戳
+    evidence_chunk_id: int | None = None  # 证据 Chunk ID
+    last_hit: int | None = None  # 最后访问时间戳
     access_count: int = 0  # 访问次数
 
     def to_db_row(self) -> tuple:
@@ -215,9 +218,9 @@ class GraphBuildJob:
     chunk_ids: list[int] = field(default_factory=list)  # Chunk ID 列表
     status: str = "pending"  # pending / processing / done / failed
     created_at: int = field(default_factory=lambda: int(time.time()))
-    started_at: Optional[int] = None
-    finished_at: Optional[int] = None
-    error_msg: Optional[str] = None
+    started_at: int | None = None
+    finished_at: int | None = None
+    error_msg: str | None = None
 
     def to_db_row(self) -> tuple:
         """转换为数据库行"""
@@ -273,7 +276,7 @@ class ChunkMeta:
     """
 
     chunk_id: int
-    note_id: Optional[str] = None
+    note_id: str | None = None
     inherited_meta: dict = field(default_factory=dict)
     is_representative: bool = False
 
@@ -320,11 +323,11 @@ class EntityType:
 
 
 __all__ = [
-    "Note",
-    "Entity",
-    "Relation",
-    "GraphBuildJob",
     "ChunkMeta",
-    "RelationType",
+    "Entity",
     "EntityType",
+    "GraphBuildJob",
+    "Note",
+    "Relation",
+    "RelationType",
 ]

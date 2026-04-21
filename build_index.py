@@ -148,11 +148,20 @@ def process_and_commit_batch(
     return start_idx + len(chunks)
 
 
-def main():
+def main(args=None):
     parser = argparse.ArgumentParser(description="tinyRAG 高性能索引构建器")
     parser.add_argument("--force", action="store_true", help="重建所有索引")
     parser.add_argument("--batch-size", type=int, default=128, help="向量化批大小")
-    args = parser.parse_args()
+
+    if args is None:
+        args = parser.parse_args()
+    else:
+        # 从传入的 Namespace 对象读取参数
+        force = getattr(args, 'force', False)
+        batch_size = getattr(args, 'batch_size', 128)
+        # 创建新的 Namespace 对象
+        args = argparse.Namespace(force=force, batch_size=batch_size)
+
     try:
         config = load_config("config.yaml")
     except Exception as e:

@@ -10,11 +10,63 @@ import re
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass, field
+from typing import ClassVar
 
 from loguru import logger
 
 from plugins.tinyrag_memory_graph.config import ExtractionConfig, LLMConfig, MemoryGraphConfig
 from plugins.tinyrag_memory_graph.models import Entity, EntityType, Relation, RelationType
+
+
+def clean_entity_name(name: str) -> str | None:
+    """
+    清理实体名称，过滤无效实体
+
+    Args:
+        name: 原始实体名称
+
+    Returns:
+        清理后的实体名称，如果无效则返回 None
+    """
+    if not name:
+        return None
+
+    original_name = name
+
+    # 1. 移除 Markdown 代码块标记
+    name = re.sub(r"```.*?```", "", name, flags=re.DOTALL)
+
+    # 2. 移除 Markdown 链接标记 [[...]]
+    name = re.sub(r"\[\[(.*?)\]\]", r"\1", name)
+
+    # 3. 移除首尾特殊字符
+    name = re.sub(r"^[\W_]+|[\W_]+$", "", name)
+
+    # 4. 过滤过长的随机字符串（长度>50 且全为字母数字）
+    if len(name) > 50 and re.match(r"^[A-Za-z0-9]+$", name):
+        logger.debug(f"[EntityCleaner] 过滤过长随机字符串：{original_name}")
+        return None
+
+    # 5. 过滤长度异常的实体（但允许版本号格式）
+    if len(name) < 2:
+        logger.debug(f"[EntityCleaner] 过滤长度异常实体：{original_name}")
+        return None
+
+    # 6. 过滤纯数字、纯符号的实体（但允许版本号格式）
+    if re.match(r"^[\d\W]+$", name) and not re.match(r"^v?\d+\.\d+(\.\d+)*$", name):
+        logger.debug(f"[EntityCleaner] 过滤纯数字/符号实体：{original_name}")
+        return None
+
+    # 7. 过滤包含过多特殊字符的实体
+    special_char_count = len(re.findall(r"[\W_]", name))
+    if special_char_count > len(name) * 0.5:
+        logger.debug(f"[EntityCleaner] 过滤特殊字符过多实体：{original_name}")
+        return None
+
+    if original_name != name:
+        logger.debug(f"[EntityCleaner] 清理实体名称：{original_name} -> {name}")
+
+    return name if name.strip() else None
 
 
 @dataclass
@@ -77,9 +129,7 @@ class FrontmatterParser:
             # 处理列表值
             if value.startswith("[") and value.endswith("]"):
                 value = [v.strip() for v in value[1:-1].split(",") if v.strip()]
-            elif value.startswith('"') and value.endswith('"'):
-                value = value[1:-1]
-            elif value.startswith("'") and value.endswith("'"):
+            elif (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
                 value = value[1:-1]
 
             result[key] = value
@@ -191,7 +241,7 @@ class NLPExtractor:
             self._nlp = None
             self._initialized = True
 
-    def extract_entities(self, text: str) -> list[Entity]:
+    def extract_entities(self, text: str, chunk_id: str | None = None) -> list[Entity]:
         """从文本中抽取实体"""
         self._ensure_nlp()
 
@@ -211,12 +261,18 @@ class NLPExtractor:
                 except (TypeError, AttributeError):
                     pass
 
+                # ✅ 新增：清洗实体名称
+                cleaned_name = clean_entity_name(ent.text)
+                if cleaned_name is None:
+                    continue
+
                 entity = Entity(
-                    id=self._generate_entity_id(ent.text, ent.label_),
-                    canonical_name=ent.text.strip(),
+                    id=self._generate_entity_id(cleaned_name, ent.label_),
+                    canonical_name=cleaned_name,
                     type=self._map_entity_type(ent.label_),
                     confidence=min(1.0, confidence),
                     source="spacy",
+                    chunk_id=chunk_id,  # 新增：记录所属 Chunk
                 )
                 entities.append(entity)
         except Exception as e:
@@ -265,7 +321,7 @@ class RuleExtractor:
     """
 
     # 默认规则词典
-    DEFAULT_PATTERNS = {
+    DEFAULT_PATTERNS: ClassVar[dict] = {
         # 项目模式
         r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\s+项目)\b": EntityType.PROJECT,
         # 技术术语
@@ -298,7 +354,7 @@ class RuleExtractor:
             except Exception as e:
                 logger.warning(f"[RuleExtractor] Failed to load custom dict: {e}")
 
-    def extract_entities(self, text: str) -> list[Entity]:
+    def extract_entities(self, text: str, chunk_id: str | None = None) -> list[Entity]:
         """从文本中抽取实体"""
         entities = []
 
@@ -306,12 +362,19 @@ class RuleExtractor:
             try:
                 for match in re.finditer(pattern, text):
                     name = match.group(1) if match.lastindex else match.group(0)
+
+                    # ✅ 新增：清洗实体名称
+                    cleaned_name = clean_entity_name(name)
+                    if cleaned_name is None:
+                        continue
+
                     entity = Entity(
-                        id=hashlib.md5(f"{entity_type}:{name}".encode()).hexdigest()[:16],
-                        canonical_name=name.strip(),
+                        id=hashlib.md5(f"{entity_type}:{cleaned_name}".encode()).hexdigest()[:16],
+                        canonical_name=cleaned_name,
                         type=entity_type,
                         confidence=1.0,  # 规则匹配置信度高
                         source="rule",
+                        chunk_id=chunk_id,  # 新增：记录所属 Chunk
                     )
                     entities.append(entity)
             except re.error as e:
@@ -382,9 +445,8 @@ class LLMExtractor:
         finally:
             self._model_loaded = True
 
-    def extract_entities(self, text: str) -> tuple[list[Entity], list[Relation]]:
+    def extract_entities(self, text: str, chunk_id: str | None = None) -> tuple[list[Entity], list[Relation]]:
         """使用 LLM 抽取实体和关系"""
-        import json
 
         # 加载模型（延迟加载）
         self._load_llm()
@@ -444,13 +506,19 @@ class LLMExtractor:
                 entities = []
                 for e in data.get("entities", []):
                     if isinstance(e, dict) and "name" in e:
+                        # ✅ 新增：清洗实体名称
+                        cleaned_name = clean_entity_name(e["name"])
+                        if cleaned_name is None:
+                            continue
+
                         entities.append(
                             Entity(
-                                id=hashlib.md5(f"{e.get('type', 'UNKNOWN')}:{e['name']}".encode()).hexdigest()[:16],
-                                canonical_name=e["name"],
+                                id=hashlib.md5(f"{e.get('type', 'UNKNOWN')}:{cleaned_name}".encode()).hexdigest()[:16],
+                                canonical_name=cleaned_name,
                                 type=e.get("type", "UNKNOWN"),
                                 confidence=0.7,
                                 source="llm",
+                                chunk_id=chunk_id,  # 新增：记录所属 Chunk
                             )
                         )
 
@@ -512,10 +580,7 @@ class LLMExtractor:
             name_match = name_pattern.search(block)
             type_match = type_pattern.search(block)
             if name_match:
-                entities.append({
-                    "name": name_match.group(1),
-                    "type": type_match.group(1) if type_match else "UNKNOWN"
-                })
+                entities.append({"name": name_match.group(1), "type": type_match.group(1) if type_match else "UNKNOWN"})
 
         if entities:
             return {"entities": entities}
@@ -618,38 +683,50 @@ class DualLayerExtractor:
 
         # 3. 从 Frontmatter 创建实体
         if result.frontmatter.get("author"):
-            result.entities.append(
-                Entity(
-                    id=hashlib.md5(f"person:{result.frontmatter['author']}".encode()).hexdigest()[:16],
-                    canonical_name=result.frontmatter["author"],
-                    type=EntityType.PERSON,
-                    confidence=1.0,
-                    source="frontmatter",
+            # ✅ 新增：清洗实体名称
+            cleaned_name = clean_entity_name(result.frontmatter["author"])
+            if cleaned_name:
+                result.entities.append(
+                    Entity(
+                        id=hashlib.md5(f"person:{cleaned_name}".encode()).hexdigest()[:16],
+                        canonical_name=cleaned_name,
+                        type=EntityType.PERSON,
+                        confidence=1.0,
+                        source="frontmatter",
+                        chunk_id=None,  # Frontmatter 实体不关联特定 Chunk
+                    )
                 )
-            )
 
         if result.frontmatter.get("project"):
-            result.entities.append(
-                Entity(
-                    id=hashlib.md5(f"project:{result.frontmatter['project']}".encode()).hexdigest()[:16],
-                    canonical_name=result.frontmatter["project"],
-                    type=EntityType.PROJECT,
-                    confidence=1.0,
-                    source="frontmatter",
+            # ✅ 新增：清洗实体名称
+            cleaned_name = clean_entity_name(result.frontmatter["project"])
+            if cleaned_name:
+                result.entities.append(
+                    Entity(
+                        id=hashlib.md5(f"project:{cleaned_name}".encode()).hexdigest()[:16],
+                        canonical_name=cleaned_name,
+                        type=EntityType.PROJECT,
+                        confidence=1.0,
+                        source="frontmatter",
+                        chunk_id=None,  # Frontmatter 实体不关联特定 Chunk
+                    )
                 )
-            )
 
         # 4. 为标签创建实体
         for tag in result.frontmatter.get("tags", []):
-            result.entities.append(
-                Entity(
-                    id=hashlib.md5(f"tag:{tag}".encode()).hexdigest()[:16],
-                    canonical_name=tag,
-                    type=EntityType.CONCEPT,
-                    confidence=1.0,
-                    source="frontmatter",
+            # ✅ 新增：清洗实体名称
+            cleaned_name = clean_entity_name(tag)
+            if cleaned_name:
+                result.entities.append(
+                    Entity(
+                        id=hashlib.md5(f"tag:{cleaned_name}".encode()).hexdigest()[:16],
+                        canonical_name=cleaned_name,
+                        type=EntityType.CONCEPT,
+                        confidence=1.0,
+                        source="frontmatter",
+                        chunk_id=None,  # Frontmatter 实体不关联特定 Chunk
+                    )
                 )
-            )
 
         result.processing_time_ms = (time.time() - start_time) * 1000
         return result
@@ -666,7 +743,7 @@ class DualLayerExtractor:
         result = ExtractionResult(source="chunk_level")
 
         # 1. 规则抽取（快速）
-        rule_entities = self.rule_extractor.extract_entities(chunk_content)
+        rule_entities = self.rule_extractor.extract_entities(chunk_content, chunk_id)
         result.entities.extend(rule_entities)
 
         # 2. NLP 抽取（如果启用）
@@ -678,7 +755,7 @@ class DualLayerExtractor:
                     pass
                 else:
                     with ThreadPoolExecutor(max_workers=1) as executor:
-                        future = executor.submit(self.nlp_extractor.extract_entities, chunk_content)
+                        future = executor.submit(self.nlp_extractor.extract_entities, chunk_content, chunk_id)
                         try:
                             nlp_entities = future.result(timeout=self.extraction_config.chunk_timeout_ms / 1000)
                             result.entities.extend(nlp_entities)
@@ -751,11 +828,11 @@ class DualLayerExtractor:
 
 
 __all__ = [
-    "FrontmatterParser",
-    "WikilinkExtractor",
-    "NLPExtractor",
-    "RuleExtractor",
-    "LLMExtractor",
     "DualLayerExtractor",
     "ExtractionResult",
+    "FrontmatterParser",
+    "LLMExtractor",
+    "NLPExtractor",
+    "RuleExtractor",
+    "WikilinkExtractor",
 ]

@@ -324,8 +324,8 @@ class MemoryGraphConfig:
 
 
 __all__ = [
-    "LLMConfig",
     "ExtractionConfig",
+    "LLMConfig",
     "MemifyConfig",
     "MemoryGraphConfig",
     "MetricsConfig",

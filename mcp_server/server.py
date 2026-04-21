@@ -505,17 +505,31 @@ class RebuildTool(BaseTool):
 
     async def _background_job(self, args: dict[str, Any]):
         try:
-            await self.ctx.initialize()
             logger.info("Starting background index rebuild...")
+
+            # 临时关闭主数据库连接，避免冲突
+            if self.ctx.db:
+                self.ctx.db.close()
+                self.ctx.db = None
+
             build_main = _load_build_index_main()
             import argparse
 
             batch_size = self.ctx.config.embedding_model.batch_size
             build_args = argparse.Namespace(force=True, batch_size=batch_size)
             await asyncio.to_thread(build_main, build_args)
+
+            # 重建后重新初始化数据库连接
+            await self.ctx.initialize()
+
             logger.info("Index rebuild completed successfully")
         except Exception as e:
             logger.error(f"Index rebuild failed: {e}", exc_info=True)
+            # 尝试恢复数据库连接
+            try:
+                await self.ctx.initialize()
+            except:
+                pass
             raise
 
 

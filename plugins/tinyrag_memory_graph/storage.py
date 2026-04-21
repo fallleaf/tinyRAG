@@ -13,9 +13,9 @@ import array
 import sqlite3
 import time
 from pathlib import Path
-from typing import Optional
 
 from loguru import logger
+
 from plugins.tinyrag_memory_graph.config import MemoryGraphConfig
 from plugins.tinyrag_memory_graph.models import ChunkMeta, Entity, GraphBuildJob, Note, Relation
 
@@ -26,7 +26,7 @@ def _row_to_dict(row) -> dict:
         return {}
     # 尝试 sqlite3.Row 接口
     if hasattr(row, "keys"):
-        return {key: row[key] for key in row.keys()}
+        return {key: row[key] for key in row}
     # 如果是 tuple，无法转换（需要列名），返回空
     if isinstance(row, tuple):
         raise ValueError("Cannot convert tuple to dict without column names. Use conn.row_factory = sqlite3.Row")
@@ -137,12 +137,12 @@ class GraphStorage:
             logger.error(f"[GraphStorage] upsert_note error: {e}")
             return False
 
-    def get_note(self, note_id: str) -> Optional[Note]:
+    def get_note(self, note_id: str) -> Note | None:
         """获取文档记录"""
         row = self.conn.execute("SELECT * FROM notes WHERE note_id = ?", (note_id,)).fetchone()
         return Note.from_db_row(_row_to_dict(row)) if row else None
 
-    def get_note_by_filepath(self, filepath: str) -> Optional[Note]:
+    def get_note_by_filepath(self, filepath: str) -> Note | None:
         """通过文件路径获取文档记录"""
         row = self.conn.execute("SELECT * FROM notes WHERE filepath = ?", (filepath,)).fetchone()
         return Note.from_db_row(_row_to_dict(row)) if row else None
@@ -172,13 +172,14 @@ class GraphStorage:
         """插入或更新实体"""
         try:
             self.conn.execute(
-                """INSERT INTO entities (id, canonical_name, type, confidence, source)
-                   VALUES (?, ?, ?, ?, ?)
+                """INSERT INTO entities (id, canonical_name, type, confidence, source, chunk_id)
+                   VALUES (?, ?, ?, ?, ?, ?)
                    ON CONFLICT(id) DO UPDATE SET
                        canonical_name = excluded.canonical_name,
                        type = excluded.type,
                        confidence = MAX(confidence, excluded.confidence),
                        source = excluded.source,
+                       chunk_id = COALESCE(excluded.chunk_id, chunk_id),
                        updated_at = strftime('%s', 'now')""",
                 entity.to_db_row(),
             )
@@ -192,28 +193,29 @@ class GraphStorage:
 
     def upsert_entities_batch(self, entities: list[Entity]) -> int:
         """批量插入或更新实体（性能优化版）
-        
+
         Args:
             entities: 实体列表
-            
+
         Returns:
             成功写入的数量
         """
         if not entities:
             return 0
-        
+
         success_count = 0
         try:
             # 使用 executemany 批量操作
             rows = [e.to_db_row() for e in entities]
             self.conn.executemany(
-                """INSERT INTO entities (id, canonical_name, type, confidence, source)
-                   VALUES (?, ?, ?, ?, ?)
+                """INSERT INTO entities (id, canonical_name, type, confidence, source, chunk_id)
+                   VALUES (?, ?, ?, ?, ?, ?)
                    ON CONFLICT(id) DO UPDATE SET
                        canonical_name = excluded.canonical_name,
                        type = excluded.type,
                        confidence = MAX(confidence, excluded.confidence),
                        source = excluded.source,
+                       chunk_id = COALESCE(excluded.chunk_id, chunk_id),
                        updated_at = strftime('%s', 'now')""",
                 rows,
             )
@@ -225,17 +227,29 @@ class GraphStorage:
             for entity in entities:
                 if self.upsert_entity(entity):
                     success_count += 1
-        
+
         return success_count
 
-    def get_entity(self, entity_id: str) -> Optional[Entity]:
+    def get_entity(self, entity_id: str) -> Entity | None:
         """获取实体"""
         row = self.conn.execute("SELECT * FROM entities WHERE id = ?", (entity_id,)).fetchone()
         return Entity.from_db_row(_row_to_dict(row)) if row else None
 
     def get_entities_by_name(self, name: str) -> list[Entity]:
-        """通过名称查找实体"""
-        rows = self.conn.execute("SELECT * FROM entities WHERE canonical_name = ?", (name,)).fetchall()
+        """通过名称查找实体（返回所有匹配，包括不同 chunk_id 的）"""
+        rows = self.conn.execute(
+            "SELECT * FROM entities WHERE canonical_name = ?",
+            (name,),
+        ).fetchall()
+        return [Entity.from_db_row(_row_to_dict(r)) for r in rows]
+
+    def get_entities_by_name_with_chunk(self, name: str) -> list[Entity]:
+        """通过名称查找实体（仅返回有 chunk_id 的）"""
+        rows = self.conn.execute(
+            """SELECT * FROM entities
+               WHERE canonical_name = ? AND chunk_id IS NOT NULL""",
+            (name,),
+        ).fetchall()
         return [Entity.from_db_row(_row_to_dict(r)) for r in rows]
 
     # ==================== Relation 操作 ====================
@@ -260,16 +274,16 @@ class GraphStorage:
 
     def upsert_relations_batch(self, relations: list[Relation]) -> int:
         """批量插入或更新关系（性能优化版）
-        
+
         Args:
             relations: 关系列表
-            
+
         Returns:
             成功写入的数量
         """
         if not relations:
             return 0
-        
+
         success_count = 0
         try:
             # 使用 executemany 批量操作
@@ -292,7 +306,7 @@ class GraphStorage:
             for relation in relations:
                 if self.upsert_relation(relation):
                     success_count += 1
-        
+
         return success_count
 
     def get_relations_from(self, chunk_id: int, min_weight: float = 0.0) -> list[Relation]:
@@ -435,7 +449,7 @@ class GraphStorage:
                 error_msg = str(e).lower()
                 # 如果是列不存在的错误，尝试添加列后重试
                 if "no column" in error_msg or "table has no column" in error_msg:
-                    logger.info(f"[GraphStorage] 检测到缺失列，尝试添加...")
+                    logger.info("[GraphStorage] 检测到缺失列，尝试添加...")
                     self._ensure_chunk_columns()
                     continue
                 # 如果是数据库锁定，等待重试
@@ -463,7 +477,7 @@ class GraphStorage:
                 return False
         return False
 
-    def get_representative_chunk(self, note_id: str) -> Optional[int]:
+    def get_representative_chunk(self, note_id: str) -> int | None:
         """获取文档的代表 Chunk ID"""
         row = self.conn.execute(
             "SELECT id FROM chunks WHERE note_id = ? AND is_representative = 1 LIMIT 1", (note_id,)
@@ -480,7 +494,7 @@ class GraphStorage:
             logger.error(f"[GraphStorage] set_representative_chunk error: {e}")
             return False
 
-    def get_note_id_by_chunk(self, chunk_id: int) -> Optional[str]:
+    def get_note_id_by_chunk(self, chunk_id: int) -> str | None:
         """获取 Chunk 所属的 Note ID"""
         try:
             row = self.conn.execute("SELECT note_id FROM chunks WHERE id = ?", (chunk_id,)).fetchone()
@@ -535,7 +549,7 @@ class GraphStorage:
             logger.error(f"[GraphStorage] create_job error: {e}")
             return False
 
-    def get_pending_job(self) -> Optional[GraphBuildJob]:
+    def get_pending_job(self) -> GraphBuildJob | None:
         """获取一个待处理任务"""
         row = self.conn.execute(
             """SELECT * FROM graph_build_jobs
@@ -545,7 +559,7 @@ class GraphStorage:
         ).fetchone()
         return GraphBuildJob.from_db_row(_row_to_dict(row)) if row else None
 
-    def get_job_by_note_id(self, note_id: str) -> Optional[GraphBuildJob]:
+    def get_job_by_note_id(self, note_id: str) -> GraphBuildJob | None:
         """通过 note_id 获取任务"""
         row = self.conn.execute(
             """SELECT * FROM graph_build_jobs
@@ -582,6 +596,20 @@ class GraphStorage:
         """获取任务统计"""
         rows = self.conn.execute("SELECT status, COUNT(*) as cnt FROM graph_build_jobs GROUP BY status").fetchall()
         return {r["status"]: r["cnt"] for r in rows}
+
+    def get_entities_with_chunk_ids(self, names: list[str]) -> list[Entity]:
+        """批量获取有 chunk_id 的实体"""
+        if not names:
+            return []
+
+        placeholders = ",".join(["?" for _ in names])
+        rows = self.conn.execute(
+            f"""SELECT * FROM entities
+                WHERE canonical_name IN ({placeholders})
+                AND chunk_id IS NOT NULL""",
+            names,
+        ).fetchall()
+        return [Entity.from_db_row(_row_to_dict(r)) for r in rows]
 
     # ==================== 标签共现 ====================
 
