@@ -138,6 +138,8 @@ class GraphBuildQueue:
 
         # 写入任务表（Note 记录将在 _build_graph 中创建，避免重复写入）
         self.storage.create_job(job)
+        # 强制刷新数据库，确保任务已持久化
+        self.storage.conn.commit()
 
         # 判断执行模式：sync 参数优先，否则检查 executor 状态
         if sync or not (self._executor and self._running):

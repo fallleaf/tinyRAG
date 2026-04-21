@@ -7,7 +7,7 @@ vaults:
       patterns: []
   - path: "/home/fallleaf/Obsidian"
     name: work
-    enabled: true
+    enabled: false
     exclude:
       dirs:
         - "copilot"
