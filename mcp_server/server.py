@@ -507,6 +507,9 @@ class RebuildTool(BaseTool):
         try:
             logger.info("Starting background index rebuild...")
 
+            # 先初始化 config，避免访问 None
+            await self.ctx.initialize()
+
             # 临时关闭主数据库连接，避免冲突
             if self.ctx.db:
                 self.ctx.db.close()

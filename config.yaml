@@ -4,15 +4,11 @@ vaults:
     enabled: true
     exclude:
       dirs:
-        - "07.项目"
-        - "08.资料"
-        - "04.生活"
-        - "03.日记"
-        - "08.技术"
+        - "10.模板"
       patterns: []
   - path: "/home/fallleaf/Obsidian"
     name: work
-    enabled: false
+    enabled: true
     exclude:
       dirs:
         - "copilot"
