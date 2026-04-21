@@ -137,7 +137,9 @@ class GraphBuildQueue:
         )
 
         # 写入任务表（Note 记录将在 _build_graph 中创建，避免重复写入）
-        self.storage.create_job(job)
+        if not self.storage.create_job(job):
+            logger.error(f"[GraphBuildQueue] 创建任务失败：{task.note_id}")
+            return ""
         # 强制刷新数据库，确保任务已持久化
         self.storage.conn.commit()
 

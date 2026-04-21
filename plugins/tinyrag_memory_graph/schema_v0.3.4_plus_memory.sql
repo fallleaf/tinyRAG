@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS entities (
     type TEXT DEFAULT 'UNKNOWN',
     confidence REAL DEFAULT 1.0,
     source TEXT DEFAULT 'nlp',
+    chunk_id TEXT,
     created_at INTEGER DEFAULT (strftime('%s', 'now')),
     updated_at INTEGER DEFAULT (strftime('%s', 'now'))
 );
@@ -84,6 +85,8 @@ CREATE INDEX IF NOT EXISTS idx_rel_scope ON relations(scope);
 -- =====================================================
 -- 5. 异步建图任务表
 -- =====================================================
+-- 注意：note_id 不使用外键约束，因为 job 可能在 note 记录创建之前就存在
+-- 这是为了支持任务先于文档记录创建的场景（如批量导入时）
 CREATE TABLE IF NOT EXISTS graph_build_jobs (
     job_id TEXT PRIMARY KEY,
     note_id TEXT UNIQUE,
@@ -93,8 +96,9 @@ CREATE TABLE IF NOT EXISTS graph_build_jobs (
     started_at INTEGER,
     finished_at INTEGER,
     error_msg TEXT,
-    retry_count INTEGER DEFAULT 0,
-    FOREIGN KEY (note_id) REFERENCES notes(note_id) ON DELETE CASCADE
+    retry_count INTEGER DEFAULT 0
+    -- note_id 仅作为逻辑关联，不使用外键约束
+    -- 原因：job 创建时 note 记录可能尚未存在，外键约束会导致插入失败
 );
 
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON graph_build_jobs(status);

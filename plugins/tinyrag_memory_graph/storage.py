@@ -26,7 +26,7 @@ def _row_to_dict(row) -> dict:
         return {}
     # 尝试 sqlite3.Row 接口
     if hasattr(row, "keys"):
-        return {key: row[key] for key in row}
+        return {key: row[key] for key in row.keys()}
     # 如果是 tuple，无法转换（需要列名），返回空
     if isinstance(row, tuple):
         raise ValueError("Cannot convert tuple to dict without column names. Use conn.row_factory = sqlite3.Row")
@@ -73,6 +73,9 @@ class GraphStorage:
         # 2. 检查并添加 chunks 表扩展列
         self._ensure_chunk_columns()
 
+        # 3. 检查并添加 entities 表 chunk_id 列
+        self._ensure_entity_columns()
+
         self.conn.commit()
         self._initialized = True
 
@@ -105,6 +108,36 @@ class GraphStorage:
                     self.conn.execute(f"ALTER TABLE chunks ADD COLUMN {col_name} {col_def}")
                     added_any = True
                     logger.info(f"[GraphStorage] ✅ 添加列: chunks.{col_name}")
+                except sqlite3.OperationalError as e:
+                    # 列可能已存在，静默忽略
+                    if "duplicate column" not in str(e).lower():
+                        logger.warning(f"[GraphStorage] ⚠️ 添加列失败 {col_name}: {e}")
+                    # else: 列已存在，忽略
+                except Exception as e:
+                    if "duplicate column" not in str(e).lower():
+                        logger.warning(f"[GraphStorage] ⚠️ 添加列异常 {col_name}: {e}")
+
+        if added_any:
+            self.conn.commit()
+
+    def _ensure_entity_columns(self):
+        """确保 entities 表有所需的扩展列"""
+        # 获取现有列
+        cursor = self.conn.execute("PRAGMA table_info(entities)")
+        existing_columns = {row[1] for row in cursor.fetchall()}
+
+        # 需要添加的列
+        columns_to_add = [
+            ("chunk_id", "TEXT"),
+        ]
+
+        added_any = False
+        for col_name, col_def in columns_to_add:
+            if col_name not in existing_columns:
+                try:
+                    self.conn.execute(f"ALTER TABLE entities ADD COLUMN {col_name} {col_def}")
+                    added_any = True
+                    logger.info(f"[GraphStorage] ✅ 添加列：entities.{col_name}")
                 except sqlite3.OperationalError as e:
                     # 列可能已存在，静默忽略
                     if "duplicate column" not in str(e).lower():
@@ -538,13 +571,21 @@ class GraphStorage:
             )
             self.conn.commit()  # 确保提交
             return True
-        except sqlite3.IntegrityError:
-            # 任务已存在，更新状态
-            self.conn.execute(
-                "UPDATE graph_build_jobs SET status = ?, error_msg = NULL WHERE note_id = ?", ("pending", job.note_id)
-            )
-            self.conn.commit()  # 确保提交
-            return True
+        except sqlite3.IntegrityError as e:
+            error_msg = str(e).lower()
+            # 区分错误类型：外键约束违反 vs 唯一约束违反
+            if "foreign key" in error_msg:
+                # 外键约束违反：note_id 不存在于 notes 表
+                logger.error(f"[GraphStorage] create_job 外键约束失败，note_id={job.note_id} 不存在于 notes 表: {e}")
+                return False
+            else:
+                # 唯一约束违反：任务已存在，更新状态
+                self.conn.execute(
+                    "UPDATE graph_build_jobs SET status = ?, error_msg = NULL WHERE note_id = ?",
+                    ("pending", job.note_id),
+                )
+                self.conn.commit()  # 确保提交
+                return True
         except Exception as e:
             logger.error(f"[GraphStorage] create_job error: {e}")
             return False
