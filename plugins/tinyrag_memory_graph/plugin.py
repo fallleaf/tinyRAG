@@ -9,16 +9,14 @@ plugin.py - Memory Graph 插件主类
 import hashlib
 import sqlite3
 import time
-from typing import Optional
 
 from loguru import logger
 
 from plugins.bootstrap import PluginBase  # 继承插件基类
-
 from plugins.tinyrag_memory_graph.config import MemoryGraphConfig
 from plugins.tinyrag_memory_graph.graph_builder import GraphBuilder
 from plugins.tinyrag_memory_graph.hooks import HookContext, HookResult
-from plugins.tinyrag_memory_graph.hybrid_retriever import HybridRetriever, HybridSearchResult
+from plugins.tinyrag_memory_graph.hybrid_retriever import HybridRetriever
 from plugins.tinyrag_memory_graph.memify import MemifyEngine, PrincipleManager
 from plugins.tinyrag_memory_graph.metrics import MetricsCollector, get_metrics_collector
 from plugins.tinyrag_memory_graph.storage import GraphStorage
@@ -28,7 +26,7 @@ class MemoryGraphPlugin(PluginBase):
     """
     Memory Graph 插件主类
 
-    提供图-向量混合记忆功能，通过钩子协议与 tinyRAG 核心集成。
+    提供图 - 向量混合记忆功能，通过钩子协议与 tinyRAG 核心集成。
 
     使用示例:
         config = MemoryGraphConfig.from_yaml("config.yaml")
@@ -78,13 +76,13 @@ class MemoryGraphPlugin(PluginBase):
         self._started = False
 
         # 组件（延迟初始化）
-        self._db: Optional[sqlite3.Connection] = None
-        self._storage: Optional[GraphStorage] = None
-        self._graph_builder: Optional[GraphBuilder] = None
-        self._hybrid_retriever: Optional[HybridRetriever] = None
-        self._memify_engine: Optional[MemifyEngine] = None
-        self._principle_manager: Optional[PrincipleManager] = None
-        self._metrics: Optional[MetricsCollector] = None
+        self._db: sqlite3.Connection | None = None
+        self._storage: GraphStorage | None = None
+        self._graph_builder: GraphBuilder | None = None
+        self._hybrid_retriever: HybridRetriever | None = None
+        self._memify_engine: MemifyEngine | None = None
+        self._principle_manager: PrincipleManager | None = None
+        self._metrics: MetricsCollector | None = None
 
         # 统计
         self._stats = {
@@ -126,7 +124,7 @@ class MemoryGraphPlugin(PluginBase):
                 return True
             except Exception as e:
                 # 打印错误信息，便于调试
-                logger.error(f"[MemoryGraphPlugin] ❌ 初始化失败: {e}")
+                logger.error(f"[MemoryGraphPlugin] ❌ 初始化失败：{e}")
                 import traceback
 
                 traceback.print_exc()
@@ -141,7 +139,7 @@ class MemoryGraphPlugin(PluginBase):
                 try:
                     self._graph_builder.stop()
                 except Exception as e:
-                    logger.warning(f"[MemoryGraphPlugin] ⚠️ 停止图谱构建器失败: {e}")
+                    logger.warning(f"[MemoryGraphPlugin] ⚠️ 停止图谱构建器失败：{e}")
 
             # 停止代谢引擎（同步方式）
             if self._memify_engine:
@@ -155,7 +153,7 @@ class MemoryGraphPlugin(PluginBase):
                     finally:
                         loop.close()
                 except Exception as e:
-                    logger.warning(f"[MemoryGraphPlugin] ⚠️ 停止代谢引擎失败: {e}")
+                    logger.warning(f"[MemoryGraphPlugin] ⚠️ 停止代谢引擎失败：{e}")
 
             self._started = False
 
@@ -210,7 +208,7 @@ class MemoryGraphPlugin(PluginBase):
             try:
                 self._initialize_sync()
             except Exception as e:
-                logger.warning(f"[MemoryGraphPlugin] ⚠️ 初始化失败，跳过清理: {e}")
+                logger.warning(f"[MemoryGraphPlugin] ⚠️ 初始化失败，跳过清理：{e}")
                 return None
 
         try:
@@ -239,7 +237,7 @@ class MemoryGraphPlugin(PluginBase):
             logger.info("[MemoryGraphPlugin] 🧹 索引重建，已清理图谱数据")
             return {"cleaned": True}
         except Exception as e:
-            logger.error(f"[MemoryGraphPlugin] ❌ 清理图谱数据失败: {e}")
+            logger.error(f"[MemoryGraphPlugin] ❌ 清理图谱数据失败：{e}")
             # 确保外键约束恢复
             try:
                 self._db.execute("PRAGMA foreign_keys = ON")
@@ -259,7 +257,7 @@ class MemoryGraphPlugin(PluginBase):
         file_to_read = absolute_path or filepath
         if file_to_read:
             try:
-                with open(file_to_read, "r", encoding="utf-8") as f:
+                with open(file_to_read, encoding="utf-8") as f:
                     full_content = f.read()
             except Exception as e:
                 logger.warning(f"[MemoryGraphPlugin] ⚠️ 无法读取文件 {file_to_read}: {e}")
@@ -310,7 +308,7 @@ class MemoryGraphPlugin(PluginBase):
             query=query,
             query_vec=kwargs.get("query_vec"),
             results=results,
-            # 修复问题1：接收基础检索的权重参数
+            # 修复问题 1：接收基础检索的权重参数
             base_alpha=kwargs.get("base_alpha"),
             base_beta=kwargs.get("base_beta"),
         )
@@ -342,7 +340,7 @@ class MemoryGraphPlugin(PluginBase):
                 self._initialize_sync()
                 logger.info("[MemoryGraphPlugin] ✅ 数据库连接已设置，Schema 初始化完成")
             except Exception as e:
-                logger.error(f"[MemoryGraphPlugin] ❌ 初始化失败: {e}")
+                logger.error(f"[MemoryGraphPlugin] ❌ 初始化失败：{e}")
                 import traceback
 
                 traceback.print_exc()
@@ -463,7 +461,7 @@ class MemoryGraphPlugin(PluginBase):
             return HookResult.ok("Plugin disabled or not initialized")
 
         if not ctx.query_vec or not ctx.results:
-            logger.info(f"[MemoryGraphPlugin] No query vector or results to enhance")
+            logger.info("[MemoryGraphPlugin] No query vector or results to enhance")
             return HookResult.ok("No query vector or results to enhance")
 
         start_time = time.time()
@@ -484,10 +482,10 @@ class MemoryGraphPlugin(PluginBase):
 
             logger.info(f"[MemoryGraphPlugin] Extracted {len(vector_results)} vector results")
 
-            # 修复问题1：使用从 rag_cli 传递的基础检索权重，如果没有则使用插件配置
+            # 修复问题 1：使用从 rag_cli 传递的基础检索权重，如果没有则使用插件配置
             # 注意：这里的 alpha 是基础分数保留系数，不是 HybridEngine 的语义权重
             # 当基础检索使用了特定的 alpha/beta 时，图谱增强应该感知但不重复计算
-            graph_alpha = self.plugin_config.retrieval.alpha if ctx.base_alpha is None else 1.0
+            graph_alpha = self.plugin_config.retrieval.alpha if ctx.base_alpha is None else ctx.base_alpha
             graph_beta = self.plugin_config.retrieval.beta
 
             logger.info(f"[MemoryGraphPlugin] graph_alpha={graph_alpha}, graph_beta={graph_beta}")
@@ -530,197 +528,17 @@ class MemoryGraphPlugin(PluginBase):
                             "base_final_score": er.base_final_score,  # 保留基础检索分数
                             "semantic_score": final_semantic,  # 保留原始语义分（keyword 模式下应为 0）
                             "keyword_score": orig.get("keyword_score", er.keyword_score),  # 保留原始关键词得分
-                            "confidence_score": orig.get("confidence_score", er.confidence_score),  # 保留原始置信度
-                            "graph_score": er.graph_score,
-                            "hop_distance": er.hop_distance,
-                            "tags": er.tags,
-                            "note_title": er.note_title,
                         }
                     )
 
-                # 更新上下文
+                # 更新上下文中的结果
                 ctx.results = new_results
-
-                # 记录检索命中
-                if self._memify_engine:
-                    self._memify_engine.record_search_hit([er.chunk_id for er in enhanced_results[:5]])
-
-            self._stats["searches_enhanced"] += 1
-
-            latency = (time.time() - start_time) * 1000
-            if self._metrics:
-                self._metrics.record_retrieval_latency(latency, "graph_enhanced")
-
-            return HookResult.ok(
-                message=f"Enhanced {len(enhanced_results)} results",
-                modified=True,
-                metrics={"latency_ms": latency, "results_count": len(enhanced_results)},
-            )
+                logger.info(f"[MemoryGraphPlugin] Graph enhancement completed, updated {len(new_results)} results")
+                return HookResult.ok("Graph enhancement completed", modified=True)
+            else:
+                logger.warning("[MemoryGraphPlugin] No enhanced results returned")
+                return HookResult.ok("No enhanced results returned")
 
         except Exception as e:
-            return HookResult.fail(f"on_search_after error: {e}")
-
-    async def on_response(self, ctx: HookContext) -> HookResult:
-        """
-        LLM 输出后钩子（FR-3.2）
-
-        更新访问计数和边权重。
-        """
-        if not self.plugin_config.enabled or not self._memify_engine:
-            return HookResult.ok("Plugin disabled or not initialized")
-
-        try:
-            # 更新检索命中的关系访问记录
-            chunk_ids = ctx.get_result_chunk_ids()
-            if chunk_ids and self._storage:
-                # 更新 Chunk 访问计数
-                for cid in chunk_ids[:5]:  # 最多更新前 5 个
-                    self._db.execute(
-                        """UPDATE chunks SET
-                               access_count = access_count + 1,
-                               last_accessed = strftime('%s', 'now')
-                           WHERE id = ?""",
-                        (cid,),
-                    )
-
-                # 记录标签共现
-                self._memify_engine.record_search_hit(chunk_ids)
-
-            self._db.commit()
-
-            return HookResult.ok("Access records updated")
-
-        except Exception as e:
-            return HookResult.fail(f"on_response error: {e}")
-
-    async def on_delete_document(self, ctx: HookContext) -> HookResult:
-        """文档删除后钩子"""
-        if not self.plugin_config.enabled or not self._graph_builder:
-            return HookResult.ok("Plugin disabled or not initialized")
-
-        try:
-            filepath = ctx.metadata.get("filepath", "")
-            if filepath:
-                self._graph_builder.delete_document(filepath)
-
-            return HookResult.ok(f"Document graph data deleted: {filepath}")
-
-        except Exception as e:
-            return HookResult.fail(f"on_delete_document error: {e}")
-
-    # ==================== 公开 API ====================
-
-    def search(
-        self, query: str, query_vec: list[float], top_k: int = 10, preferences: dict = None
-    ) -> list[HybridSearchResult]:
-        """
-        执行图谱增强检索
-
-        Args:
-            query: 查询文本
-            query_vec: 查询向量
-            top_k: 返回结果数
-            preferences: 用户偏好
-
-        Returns:
-            检索结果列表
-        """
-        if not self._hybrid_retriever:
-            return []
-
-        return self._hybrid_retriever.search(
-            query=query,
-            query_vec=query_vec,
-            top_k=top_k,
-            user_preferences=preferences,
-        )
-
-    def get_stats(self) -> dict:
-        """获取插件统计"""
-        stats = {
-            "enabled": self.plugin_config.enabled,
-            "initialized": self._initialized,
-            "started": self._started,
-            **self._stats,
-        }
-
-        if self._graph_builder:
-            stats["graph_builder"] = self._graph_builder.get_stats()
-
-        if self._memify_engine:
-            stats["memify"] = self._memify_engine.get_stats()
-
-        if self._hybrid_retriever:
-            stats["retrieval"] = self._hybrid_retriever.get_metrics()
-
-        return stats
-
-    def get_pending_principles(self, limit: int = 20) -> list[dict]:
-        """获取待审核原则"""
-        if not self._principle_manager:
-            return []
-        return self._principle_manager.get_pending_principles(limit)
-
-    def approve_principle(self, principle_id: int) -> bool:
-        """批准原则"""
-        if not self._principle_manager:
-            return False
-        return self._principle_manager.approve_principle(principle_id)
-
-    def reject_principle(self, principle_id: int) -> bool:
-        """拒绝原则"""
-        if not self._principle_manager:
-            return False
-        return self._principle_manager.reject_principle(principle_id)
-
-    def export_metrics(self, format: str = "csv") -> str:
-        """
-        导出指标
-
-        Args:
-            format: csv / prometheus / json
-
-        Returns:
-            导出文件路径或内容
-        """
-        if not self._metrics:
-            return ""
-
-        if format == "csv":
-            return self._metrics.export_csv()
-        elif format == "prometheus":
-            return self._metrics.export_prometheus()
-        else:
-            return self._metrics.export_json()
-
-    async def run_memify(self) -> dict:
-        """手动触发记忆代谢"""
-        if not self._memify_engine:
-            return {"error": "Memify engine not initialized"}
-
-        stats = await self._memify_engine.run_memify()
-        return {
-            "relations_decayed": stats.relations_decayed,
-            "relations_marked_stale": stats.relations_marked_stale,
-            "relations_boosted": stats.relations_boosted,
-            "principles_generated": stats.principles_generated,
-            "processing_time_ms": stats.processing_time_ms,
-        }
-
-
-# 插件入口点
-def create_plugin(config: dict = None) -> MemoryGraphPlugin:
-    """
-    创建插件实例（入口点函数）
-
-    Args:
-        config: 配置字典
-
-    Returns:
-        插件实例
-    """
-    cfg = MemoryGraphConfig.from_dict(config) if config else MemoryGraphConfig()
-    return MemoryGraphPlugin(cfg)
-
-
-__all__ = ["MemoryGraphPlugin", "create_plugin"]
+            logger.exception(f"[MemoryGraphPlugin] Error during graph enhancement: {e}")
+            return HookResult.fail(f"Graph enhancement failed: {e}")
