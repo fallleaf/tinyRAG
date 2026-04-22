@@ -129,6 +129,8 @@ def main():
         changed_paths = [f.absolute_path for f in report.new_files + report.modified_files]
         changed_paths.extend([f.new_absolute_path for f in report.moved_files])
 
+        files_to_index = []
+        missing = []
         if changed_paths:
             placeholders = ",".join(["?"] * len(changed_paths))
             cursor = db.conn.execute(
@@ -140,10 +142,10 @@ def main():
         # 🔧 精准自愈：仅在无变更时检查缺失 chunks，并过滤空文件
         if not files_to_index:
             cursor = db.conn.execute("""
-                SELECT f.id, f.vault_name, f.absolute_path, f.file_path, f.mtime 
-                FROM files f 
-                WHERE f.is_deleted = 0 
-                  AND NOT EXISTS (SELECT 1 FROM chunks c WHERE c.file_id = f.id) 
+                SELECT f.id, f.vault_name, f.absolute_path, f.file_path, f.mtime
+                FROM files f
+                WHERE f.is_deleted = 0
+                  AND NOT EXISTS (SELECT 1 FROM chunks c WHERE c.file_id = f.id)
                 LIMIT 1000
             """)
             missing = [dict(row) for row in cursor.fetchall()]
