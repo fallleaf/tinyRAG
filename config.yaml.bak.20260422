@@ -91,7 +91,7 @@ embedding_model:
 
 chunking:
   max_tokens: 512
-  overlap: 100
+  overlap: 50
   token_mode: "tiktoken"
   chinese_chars_per_token: 1.5
   english_chars_per_token: 4.0
@@ -143,8 +143,8 @@ cache:
   ttl_seconds: 36000
   max_entries: 1000
 retrieval:
-  alpha: 0.6
-  beta: 0.4
+  alpha: 0.7
+  beta: 0.3
 jieba_user_dict: "data/jieba_user_dict.txt"
 stream_batch_size: 64
 max_concurrent_files: 4

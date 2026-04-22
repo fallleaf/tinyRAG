@@ -6,6 +6,7 @@ retriever/hybrid_engine.py - 混合检索引擎 (v2.0 - 动态置信度/双层�
 - P1: 优化缓存键生成，修复时间范围查询缓存隔离
 - P2: 严格隔离向量/FTS5 得分量级 (log1p 平滑)
 """
+
 import hashlib
 import importlib.util
 import json
@@ -15,11 +16,14 @@ import threading
 from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, List, Tuple
 
 from storage.database import DatabaseManager
 from utils.logger import logger
 from utils.jieba_helper import jieba_segment  # ✅ DRY 重构：统一分词入口
+
+# ✅ 导入去重工具
+from utils.dedup import deduplicate_chunks
 
 # 时间范围查询检测正则
 _TIME_RANGE_PATTERNS = [
@@ -31,6 +35,7 @@ _TIME_RANGE_PATTERNS = [
 # 检查 jieba 是否可用
 try:
     import jieba
+
     JIEBA_AVAILABLE = True
     jieba.initialize()
 except ImportError:
@@ -42,12 +47,14 @@ _cache_spec = importlib.util.find_spec("storage.cache")
 if _cache_spec:
     try:
         from storage.cache import get_cache
+
         CACHE_AVAILABLE = True
     except ImportError:
         CACHE_AVAILABLE = False
         logger.warning("⚠️ Cache 模块导入失败，将仅使用内存缓存")
 else:
     CACHE_AVAILABLE = False
+
 
 @dataclass
 class RetrievalResult:
@@ -66,14 +73,16 @@ class RetrievalResult:
     final_score: float
     confidence_reason: str
     file_hash: str
+    embedding: Any = None  # 用于去重的向量
+
 
 class HybridEngine:
     def __init__(self, config: Any, db: DatabaseManager, embed_engine: Any):
         self.config = config
         self.db = db
         self.embed_engine = embed_engine
-        self.alpha = config.retrieval.get("alpha", 0.7)
-        self.beta = config.retrieval.get("beta", 0.3)
+        self.alpha = config.retrieval.get("alpha", 0.7) if config else 0.7
+        self.beta = config.retrieval.get("beta", 0.3) if config else 0.3
 
         # 双层缓存
         self._memory_cache: OrderedDict = OrderedDict()
@@ -96,6 +105,7 @@ class HybridEngine:
         # 加载 jieba 自定义词典 (已由 helper 接管，此处保留兼容性日志)
         if JIEBA_AVAILABLE and hasattr(config, "jieba_user_dict") and config.jieba_user_dict:
             from pathlib import Path
+
             dict_path = Path(config.jieba_user_dict).expanduser()
             if dict_path.exists():
                 logger.info(f"✅ jieba 自定义词典已就绪: {dict_path}")
@@ -108,27 +118,42 @@ class HybridEngine:
             day = int(match.group(3)) if match.group(3) else (int(match.group(5)) if match.group(5) else None)
             return {"year": year, "month": month, "day": day}
         match = re.search(r"(\d{4})年(?!\d)", query)
-        if match: return {"year": int(match.group(1)), "month": None, "day": None}
+        if match:
+            return {"year": int(match.group(1)), "month": None, "day": None}
         return None
 
     def _calculate_time_match_score(self, doc_date_str: str, query_time: dict) -> float:
-        try: doc_date = datetime.strptime(doc_date_str, "%Y-%m-%d")
-        except: return 1.0
+        try:
+            doc_date = datetime.strptime(doc_date_str, "%Y-%m-%d")
+        except Exception:
+            return 1.0
         qy, qm, qd = query_time.get("year"), query_time.get("month"), query_time.get("day")
         if doc_date.year == qy:
-            if qd and qm and doc_date.month == qm and doc_date.day == qd: return 2.0
-            if qm and doc_date.month == qm: return 1.8
+            if qd and qm and doc_date.month == qm and doc_date.day == qd:
+                return 2.0
+            if qm and doc_date.month == qm:
+                return 1.8
             return 1.5
         return max(0.2, 1.0 - abs(doc_date.year - qy) * 0.3)
 
-    def _make_cache_key(self, query: str, limit: int, vault_filter: list[str] | None,
-                        alpha: float | None = None, beta: float | None = None,
-                        query_time: dict | None = None) -> str:
+    def _make_cache_key(
+        self,
+        query: str,
+        limit: int,
+        vault_filter: list[str] | None,
+        alpha: float | None = None,
+        beta: float | None = None,
+        query_time: dict | None = None,
+    ) -> str:
         raw = f"{query}|{limit}"
-        if vault_filter: raw += f"|{','.join(sorted(vault_filter))}"
-        if alpha is not None: raw += f"|a={alpha:.2f}"
-        if beta is not None: raw += f"|b={beta:.2f}"
-        if query_time: raw += f"|t={query_time}"
+        if vault_filter:
+            raw += f"|{','.join(sorted(vault_filter))}"
+        if alpha is not None:
+            raw += f"|a={alpha:.2f}"
+        if beta is not None:
+            raw += f"|b={beta:.2f}"
+        if query_time:
+            raw += f"|t={query_time}"
         return hashlib.sha256(raw.encode()).hexdigest()
 
     @staticmethod
@@ -143,8 +168,10 @@ class HybridEngine:
         if self._cache is not None:
             try:
                 cached = self._cache.get(cache_key)
-                if cached is not None: return self._deserialize_results(cached)
-            except Exception as e: logger.warning(f"持久化缓存读取失败: {e}")
+                if cached is not None:
+                    return self._deserialize_results(cached)
+            except Exception as e:
+                logger.warning(f"持久化缓存读取失败: {e}")
         with self._cache_lock:
             cached = self._memory_cache.get(cache_key)
             if cached is not None:
@@ -155,24 +182,34 @@ class HybridEngine:
     def _cache_set(self, cache_key: str, results: list[RetrievalResult]) -> None:
         serialized = self._serialize_results(results)
         if self._cache is not None:
-            try: self._cache.set(cache_key, serialized)
-            except Exception as e: logger.warning(f"持久化缓存写入失败: {e}")
+            try:
+                self._cache.set(cache_key, serialized)
+            except Exception as e:
+                logger.warning(f"持久化缓存写入失败: {e}")
         with self._cache_lock:
             self._memory_cache[cache_key] = serialized
             self._memory_cache.move_to_end(cache_key)
             if len(self._memory_cache) > self._memory_cache_max_size:
                 self._memory_cache.popitem(last=False)
 
-    def search(self, query: str, limit: int = 10, vault_filter: list[str] | None = None,
-               alpha: float | None = None, beta: float | None = None) -> list[RetrievalResult]:
-        if not query.strip(): return []
+    def search(
+        self,
+        query: str,
+        limit: int = 10,
+        vault_filter: list[str] | None = None,
+        alpha: float | None = None,
+        beta: float | None = None,
+    ) -> list[RetrievalResult]:
+        if not query.strip():
+            return []
         effective_alpha = alpha if alpha is not None else self.alpha
         effective_beta = beta if beta is not None else self.beta
         query_time = self._extract_time_range_from_query(query)
-        
+
         cache_key = self._make_cache_key(query, limit, vault_filter, effective_alpha, effective_beta, query_time)
         cached = self._cache_get(cache_key)
-        if cached is not None: return cached
+        if cached is not None:
+            return cached
 
         query_vector = self.embed_engine.embed([query])[0]
         # ✅ 使用统一 helper 进行分词与日期保护
@@ -180,51 +217,80 @@ class HybridEngine:
         clean_keywords = re.sub(r"[^\w\s\u4e00-\u9fa5\-]", " ", keywords).strip()
         clean_keywords = re.sub(r"\s+", " ", clean_keywords)
 
-        results = self._search_internal(query_vector, clean_keywords, limit, vault_filter,
-                                        effective_alpha, effective_beta, query_time)
-        self._cache_set(cache_key, results)
-        return results
+        # ✅ 先检索更多（5 倍）用于去重
+        raw_results = self._search_internal(
+            query_vector, clean_keywords, limit * 5, vault_filter, effective_alpha, effective_beta, query_time
+        )
+
+        # ✅ 先去重：按文件去重（同一文件只保留最高分 chunk）
+        deduped_by_file = self._deduplicate_by_file(raw_results)
+
+        # ✅ 不再进行语义去重，直接返回按文件去重后的结果
+        deduped = deduped_by_file[:limit]
+
+        self._cache_set(cache_key, deduped)
+        return deduped
 
     def _calculate_dynamic_confidence(self, conf_json_str: str, query_time: dict | None = None) -> tuple[float, str]:
-        try: data = json.loads(conf_json_str or "{}")
-        except: data = {}
-        conf_cfg = self.config.confidence
+        try:
+            data = json.loads(conf_json_str or "{}")
+        except Exception:
+            data = {}
+        conf_cfg = self.config.confidence if self.config else None
+        if not conf_cfg:
+            return 1.0, "No config"
         doc_type = data.get("doc_type", "technical")
         status = data.get("status", "active")
         final_date_str = data.get("final_date")
         dt_w = conf_cfg.doc_type_rules.get(doc_type, 1.0)
         st_w = conf_cfg.status_rules.get(status, 1.0)
-        
+
         date_w, days_passed = 1.0, 365
         time_match_mode = False
         if final_date_str:
             if query_time:
                 time_match_mode = True
                 date_w = self._calculate_time_match_score(final_date_str, query_time)
-                try: days_passed = (datetime.now() - datetime.strptime(final_date_str, "%Y-%m-%d")).days
-                except: pass
+                try:
+                    days_passed = (datetime.now() - datetime.strptime(final_date_str, "%Y-%m-%d")).days
+                except Exception:
+                    pass
             else:
                 try:
                     final_dt = datetime.strptime(final_date_str, "%Y-%m-%d")
                     days_passed = (datetime.now() - final_dt).days
-                    half_life = conf_cfg.date_decay.type_specific_decay.get(doc_type, conf_cfg.date_decay.half_life_days)
+                    half_life = conf_cfg.date_decay.type_specific_decay.get(
+                        doc_type, conf_cfg.date_decay.half_life_days
+                    )
                     date_w = max(conf_cfg.date_decay.min_weight, math.pow(0.5, days_passed / half_life))
-                except: date_w = conf_cfg.date_decay.min_weight
+                except Exception:
+                    date_w = conf_cfg.date_decay.min_weight
 
         raw_factor = dt_w * st_w * date_w
         conf_score = math.log1p(raw_factor)
-        reason = f"Type:{doc_type}({dt_w}) | Status:{status}({st_w}) | {'TimeMatch' if time_match_mode else f'Age:{days_passed}d'}"
+        reason = (
+            f"Type:{doc_type}({dt_w}) | Status:{status}({st_w}) | "
+            f"{'TimeMatch' if time_match_mode else f'Age:{days_passed}d'}"
+        )
         return conf_score, reason
 
-    def _search_internal(self, query_vector: Any, keywords: str, limit: int,
-                         vault_filter: list[str] | None, alpha: float, beta: float,
-                         query_time: dict | None = None) -> list[RetrievalResult]:
+    def _search_internal(
+        self,
+        query_vector: Any,
+        keywords: str,
+        limit: int,
+        vault_filter: list[str] | None,
+        alpha: float,
+        beta: float,
+        query_time: dict | None = None,
+    ) -> list[RetrievalResult]:
         vec_results = self.db.search_vectors(query_vector, limit=limit * 2)
         vec_scores = {r[0]: r[1] for r in vec_results}
         kw_results = self.db.search_fts(keywords, limit=limit * 2)
         kw_scores = {r[0]: r[1] for r in kw_results}
         candidate_ids = list(set(vec_scores.keys()) | set(kw_scores.keys()))
-        if not candidate_ids: return []
+        if not candidate_ids:
+            return []
 
         placeholders = ",".join(["?"] * len(candidate_ids))
         query_sql = f"""
@@ -236,7 +302,7 @@ class HybridEngine:
         if vault_filter:
             query_sql += " AND f.vault_name IN ({})".format(",".join(["?"] * len(vault_filter)))
             query_params.extend(vault_filter)
-            
+
         rows = self.db.conn.execute(query_sql, query_params).fetchall()
         final_results = []
         for row in rows:
@@ -245,13 +311,48 @@ class HybridEngine:
             v_score = vec_scores.get(cid, 0.0) * alpha
             k_score = math.log1p(max(0, kw_scores.get(cid, 0.0))) * beta
             final_score = (v_score + k_score) * conf_score
-            final_results.append(RetrievalResult(
-                chunk_id=cid, content=row["content"], file_path=row["file_path"],
-                absolute_path=row["absolute_path"], section=row["section_title"] or "Root",
-                start_pos=row["start_pos"], end_pos=row["end_pos"], vault_name=row["vault_name"],
-                chunk_type=row["content_type"], semantic_score=v_score, keyword_score=k_score,
-                confidence_score=conf_score, final_score=final_score, confidence_reason=conf_reason,
-                file_hash=row["file_hash"]
-            ))
+            final_results.append(
+                RetrievalResult(
+                    chunk_id=cid,
+                    content=row["content"],
+                    file_path=row["file_path"],
+                    absolute_path=row["absolute_path"],
+                    section=row["section_title"] or "Root",
+                    start_pos=row["start_pos"],
+                    end_pos=row["end_pos"],
+                    vault_name=row["vault_name"],
+                    chunk_type=row["content_type"],
+                    semantic_score=v_score,
+                    keyword_score=k_score,
+                    confidence_score=conf_score,
+                    final_score=final_score,
+                    confidence_reason=conf_reason,
+                    file_hash=row["file_hash"],
+                    embedding=query_vector,  # ✅ 存储向量用于去重
+                )
+            )
         final_results.sort(key=lambda x: x.final_score, reverse=True)
         return final_results[:limit]
+
+    def _deduplicate_results(self, results: list[RetrievalResult], threshold: float = 0.85) -> list[RetrievalResult]:
+        """语义去重：移除相似度 > threshold 的 chunk"""
+        # 转换为 [(chunk, embedding), ...] 格式
+        chunks_with_emb: List[Tuple[RetrievalResult, Any]] = []
+        for r in results:
+            if r.embedding is not None:
+                chunks_with_emb.append((r, r.embedding))
+
+        if not chunks_with_emb:
+            return []
+
+        # 调用去重函数
+        deduped = deduplicate_chunks(chunks_with_emb, threshold=threshold)
+        return deduped
+
+    def _deduplicate_by_file(self, results: list[RetrievalResult]) -> list[RetrievalResult]:
+        """按文件去重：同一文件只保留最高分 chunk"""
+        file_map: dict[str, RetrievalResult] = {}
+        for r in results:
+            if r.file_path not in file_map or r.final_score > file_map[r.file_path].final_score:
+                file_map[r.file_path] = r
+        return list(file_map.values())
