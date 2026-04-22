@@ -305,6 +305,13 @@ class RelationType:
     TAGGED_WITH = "TAGGED_WITH"  # 标签关联
     AUTHORED_BY = "AUTHORED_BY"  # 作者关联
     BELONGS_TO = "BELONGS_TO"  # 归属关系
+    DEVELOPED_BY = "DEVELOPED_BY"  # 开发关系
+    CREATED_BY = "CREATED_BY"  # 创建关系
+    MANAGED_BY = "MANAGED_BY"  # 管理关系
+    WORKS_FOR = "WORKS_FOR"  # 工作关系
+    LOCATED_AT = "LOCATED_AT"  # 位置关系
+    DEPENDS_ON = "DEPENDS_ON"  # 依赖关系
+    USED_BY = "USED_BY"  # 使用关系
 
 
 # 实体类型常量

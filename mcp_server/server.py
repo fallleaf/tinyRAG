@@ -280,19 +280,17 @@ class SearchTool(BaseTool):
                                         end_pos=r.get("end_pos", 0),
                                         vault_name=r.get("vault_name", ""),
                                         chunk_type=r.get("chunk_type", ""),
-                                        semantic_score=r.get("semantic_score", r.get("vector_score", 0.0)),
+                                        semantic_score=r.get("semantic_score", 0.0),
                                         keyword_score=r.get("keyword_score", 0.0),
                                         confidence_score=r.get("confidence_score", 1.0),
-                                        final_score=r.get("final_score", r.get("score", 0.0)),
+                                        final_score=r.get("final_score", 0.0),
                                         confidence_reason=r.get("confidence_reason", ""),
                                         file_hash=r.get("file_hash", ""),
                                         graph_score=r.get("graph_score", 0.0),
                                         preference_score=r.get("preference_score", 0.0),
                                         hop_distance=r.get("hop_distance", 0),
                                         # 基础检索分数
-                                        base_final_score=r.get(
-                                            "base_final_score", r.get("final_score", r.get("score", 0.0))
-                                        ),
+                                        base_final_score=r.get("base_final_score", r.get("final_score", 0.0)),
                                     )
                                 )
                         if plugin_results:
@@ -529,10 +527,8 @@ class RebuildTool(BaseTool):
         except Exception as e:
             logger.error(f"Index rebuild failed: {e}", exc_info=True)
             # 尝试恢复数据库连接
-            try:
+            with contextlib.suppress(BaseException):
                 await self.ctx.initialize()
-            except:
-                pass
             raise
 
 

@@ -193,6 +193,7 @@ class HybridRetriever:
                 keyword_score = r.get("keyword_score", 0.0)
                 confidence_score = r.get("confidence_score", 1.0)
                 final_score = r.get("final_score", r.get("score", 0.0))
+                base_final_score = r.get("base_final_score", final_score)
                 content = r.get("content", "")
                 file_path = r.get("file_path", "")
             else:
@@ -202,17 +203,18 @@ class HybridRetriever:
                 keyword_score = getattr(r, "keyword_score", 0.0)
                 confidence_score = getattr(r, "confidence_score", 1.0)
                 final_score = getattr(r, "final_score", 0.0)
+                base_final_score = getattr(r, "base_final_score", final_score)
                 content = getattr(r, "content", "")
                 file_path = getattr(r, "file_path", "")
 
             converted.append(
                 {
                     "chunk_id": chunk_id,
-                    "score": semantic_score,  # 向量分数
                     "semantic_score": semantic_score,
                     "keyword_score": keyword_score,
                     "confidence_score": confidence_score,
-                    "base_final_score": final_score,  # 保留基础检索的最终分数
+                    "base_final_score": base_final_score,
+                    "final_score": final_score,
                     "content": content,
                     "file_path": file_path,
                 }
@@ -392,12 +394,12 @@ class HybridRetriever:
             cid = r["chunk_id"]
             candidates[cid] = {
                 "chunk_id": cid,
-                "vector_score": r["score"],
-                "semantic_score": r.get("semantic_score", r["score"]),
+                "vector_score": r.get("semantic_score", 0.0),
+                "semantic_score": r.get("semantic_score", 0.0),
                 "keyword_score": r.get("keyword_score", 0.0),
                 "confidence_score": r.get("confidence_score", 1.0),
                 # 修复：优先获取 base_final_score（来自 _convert_base_results）
-                "base_final_score": r.get("base_final_score", r.get("final_score", r["score"])),
+                "base_final_score": r.get("base_final_score", r.get("final_score", 0.0)),
                 "graph_score": 0.0,
                 "hop": 0,
                 "path_weight": 0.0,

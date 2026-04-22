@@ -47,7 +47,7 @@ class MemoryGraphPlugin(PluginBase):
     VERSION = "1.0.0"
     DESCRIPTION = "Graph-Vector Hybrid Memory Plugin for tinyRAG"
 
-    def __init__(self, config: dict = None, context: any = None):
+    def __init__(self, config: dict | None = None, context: object | None = None):
         """
         初始化插件
 
@@ -111,10 +111,8 @@ class MemoryGraphPlugin(PluginBase):
         """
         插件启用时调用
         """
-        if not self._db:
-            # 尝试从上下文获取
-            if self.ctx and hasattr(self.ctx, "db"):
-                self._db = self.ctx.db.conn if hasattr(self.ctx.db, "conn") else self.ctx.db
+        if not self._db and self.ctx and hasattr(self.ctx, "db"):
+            self._db = self.ctx.db.conn if hasattr(self.ctx.db, "conn") else self.ctx.db
 
         if self._db:
             try:
@@ -217,10 +215,10 @@ class MemoryGraphPlugin(PluginBase):
             self._db.execute("PRAGMA foreign_keys = OFF")
 
             # 清理引用 notes 的 chunks.note_id 列（如果存在）
-            try:
+            from contextlib import suppress
+
+            with suppress(Exception):
                 self._db.execute("UPDATE chunks SET note_id = NULL WHERE note_id IS NOT NULL")
-            except Exception:
-                pass  # 如果 chunks 表没有 note_id 列，忽略错误
 
             # 清理插件表数据
             self._db.execute("DELETE FROM graph_build_jobs")
@@ -238,10 +236,10 @@ class MemoryGraphPlugin(PluginBase):
         except Exception as e:
             logger.error(f"[MemoryGraphPlugin] ❌ 清理图谱数据失败：{e}")
             # 确保外键约束恢复
-            try:
+            from contextlib import suppress
+
+            with suppress(Exception):
                 self._db.execute("PRAGMA foreign_keys = ON")
-            except Exception:
-                pass
             return None
 
     async def _on_file_indexed_hook(
@@ -434,7 +432,9 @@ class MemoryGraphPlugin(PluginBase):
 
         增强检索结果，应用图谱扩展。
         """
-        logger.info(f"[MemoryGraphPlugin] on_search_after called, enabled={self.plugin_config.enabled}, retriever={self._hybrid_retriever is not None}")
+        logger.info(
+            f"[MemoryGraphPlugin] on_search_after called, enabled={self.plugin_config.enabled}, retriever={self._hybrid_retriever is not None}"
+        )
         if not self.plugin_config.enabled or not self._hybrid_retriever:
             return HookResult.ok("Plugin disabled or not initialized")
 
@@ -454,7 +454,11 @@ class MemoryGraphPlugin(PluginBase):
                     vector_results.append(
                         {
                             "chunk_id": chunk_id,
-                            "score": r.get("semantic_score", r.get("score", 0.5)),
+                            "semantic_score": r.get("semantic_score", 0.0),
+                            "keyword_score": r.get("keyword_score", 0.0),
+                            "confidence_score": r.get("confidence_score", 1.0),
+                            "base_final_score": r.get("base_final_score", r.get("final_score", 0.0)),
+                            "final_score": r.get("final_score", 0.0),
                         }
                     )
 
@@ -469,7 +473,9 @@ class MemoryGraphPlugin(PluginBase):
             logger.info(f"[MemoryGraphPlugin] graph_alpha={graph_alpha}, graph_beta={graph_beta}")
 
             # 执行图谱增强检索
-            logger.info(f"[MemoryGraphPlugin] Calling HybridRetriever.search, query={ctx.query}, top_k={len(ctx.results)}")
+            logger.info(
+                f"[MemoryGraphPlugin] Calling HybridRetriever.search, query={ctx.query}, top_k={len(ctx.results)}"
+            )
             enhanced_results = self._hybrid_retriever.search(
                 query=ctx.query,
                 query_vec=ctx.query_vec,

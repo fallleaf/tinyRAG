@@ -78,6 +78,11 @@ chinese_tech_terms:
   敏捷开发: TECHNOLOGY
   DevOps: TECHNOLOGY
 
+  # 网络建设
+  极简网络: TECHNOLOGY
+  本地承载: TECHNOLOGY
+  本地传输: TECHNOLOGY
+
   # 职位/角色
   算法工程师: CONCEPT
   数据科学家: CONCEPT
@@ -88,6 +93,10 @@ chinese_tech_terms:
   运维工程师: CONCEPT
   测试工程师: CONCEPT
   数据工程师: CONCEPT
+  本地承载总师: CONCEPT
+  本地传输总师: CONCEPT
+  本地传输总体组: CONCEPT
+  本地承载总体组: CONCEPT
 
 # 中文实体后缀模式
 # 用于识别组织、地点等实体

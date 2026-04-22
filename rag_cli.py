@@ -246,10 +246,10 @@ def cmd_search(args):
                                         vault_name=r.get("vault_name", ""),
                                         chunk_type=r.get("chunk_type", ""),
                                         # 保留基础检索分数
-                                        semantic_score=r.get("semantic_score", r.get("vector_score", 0.0)),
+                                        semantic_score=r.get("semantic_score", 0.0),
                                         keyword_score=r.get("keyword_score", 0.0),
                                         confidence_score=r.get("confidence_score", 1.0),
-                                        final_score=r.get("final_score", r.get("score", 0.0)),
+                                        final_score=r.get("final_score", 0.0),
                                         confidence_reason=r.get("confidence_reason", ""),
                                         file_hash=r.get("file_hash", ""),
                                         # 图谱增强分值（插件启用时才有）
