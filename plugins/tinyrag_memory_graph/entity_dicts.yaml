@@ -1,0 +1,103 @@
+# ============================================================
+# 实体词典配置文件
+# 用于自定义实体识别规则，无需修改代码
+# ============================================================
+
+# 中文技术术语词典
+# 格式：术语: 实体类型
+# 实体类型: TECHNOLOGY, PERSON, ORG, LOC, DATE, EVENT, CONCEPT, MISC
+chinese_tech_terms:
+  # AI/ML 领域
+  深度学习: TECHNOLOGY
+  机器学习: TECHNOLOGY
+  自然语言处理: TECHNOLOGY
+  计算机视觉: TECHNOLOGY
+  神经网络: TECHNOLOGY
+  卷积神经网络: TECHNOLOGY
+  循环神经网络: TECHNOLOGY
+  注意力机制: TECHNOLOGY
+  迁移学习: TECHNOLOGY
+  强化学习: TECHNOLOGY
+  知识图谱: TECHNOLOGY
+  推荐系统: TECHNOLOGY
+  搜索引擎: TECHNOLOGY
+  语音识别: TECHNOLOGY
+  图像识别: TECHNOLOGY
+  目标检测: TECHNOLOGY
+  语义分割: TECHNOLOGY
+  文本分类: TECHNOLOGY
+  情感分析: TECHNOLOGY
+  命名实体识别: TECHNOLOGY
+  分词: TECHNOLOGY
+  词向量: TECHNOLOGY
+  预训练模型: TECHNOLOGY
+  微调: TECHNOLOGY
+  提示工程: TECHNOLOGY
+  大语言模型: TECHNOLOGY
+  生成式AI: TECHNOLOGY
+  对话系统: TECHNOLOGY
+  机器翻译: TECHNOLOGY
+
+  # 数据处理
+  数据清洗: TECHNOLOGY
+  数据标注: TECHNOLOGY
+  特征工程: TECHNOLOGY
+  数据挖掘: TECHNOLOGY
+  数据分析: TECHNOLOGY
+  数据仓库: TECHNOLOGY
+  数据湖: TECHNOLOGY
+  实时计算: TECHNOLOGY
+  流处理: TECHNOLOGY
+
+  # 架构/系统
+  微服务: TECHNOLOGY
+  分布式系统: TECHNOLOGY
+  容器化: TECHNOLOGY
+  负载均衡: TECHNOLOGY
+  服务发现: TECHNOLOGY
+  配置中心: TECHNOLOGY
+  消息队列: TECHNOLOGY
+  缓存: TECHNOLOGY
+  数据库: TECHNOLOGY
+  关系型数据库: TECHNOLOGY
+  文档数据库: TECHNOLOGY
+  向量数据库: TECHNOLOGY
+  图数据库: TECHNOLOGY
+  服务网格: TECHNOLOGY
+  云原生: TECHNOLOGY
+
+  # 开发相关
+  前端开发: TECHNOLOGY
+  后端开发: TECHNOLOGY
+  全栈开发: TECHNOLOGY
+  接口: TECHNOLOGY
+  框架: TECHNOLOGY
+  中间件: TECHNOLOGY
+  持续集成: TECHNOLOGY
+  持续部署: TECHNOLOGY
+  敏捷开发: TECHNOLOGY
+  DevOps: TECHNOLOGY
+
+  # 职位/角色
+  算法工程师: CONCEPT
+  数据科学家: CONCEPT
+  架构师: CONCEPT
+  产品经理: CONCEPT
+  前端工程师: CONCEPT
+  后端工程师: CONCEPT
+  运维工程师: CONCEPT
+  测试工程师: CONCEPT
+  数据工程师: CONCEPT
+
+# 中文实体后缀模式
+# 用于识别组织、地点等实体
+# 格式：后缀: 实体类型
+chinese_entity_suffixes:
+  # 组织后缀
+  公司: ORG
+  集团: ORG
+  科技: ORG
+  实验室: ORG
+  研究院: ORG
+  研究所: ORG
+  大学: ORG

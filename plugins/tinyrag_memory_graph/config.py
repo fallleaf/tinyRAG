@@ -60,6 +60,8 @@ class ExtractionConfig:
     chunk_timeout_ms: int = 150
     # NLP 召回低于此值时触发 LLM
     llm_fallback_threshold: int = 2
+    # 实体词典配置文件路径（包含中文技术术语、实体后缀、白名单等）
+    entity_dicts_path: str | None = None
 
 
 @dataclass
@@ -209,6 +211,7 @@ class MemoryGraphConfig:
                 rule_dict_path=extraction_data.get("rule_dict_path"),
                 chunk_timeout_ms=extraction_data.get("chunk_timeout_ms", 150),
                 llm_fallback_threshold=extraction_data.get("llm_fallback_threshold", 2),
+                entity_dicts_path=extraction_data.get("entity_dicts_path"),
             ),
             retrieval=RetrievalConfig(
                 vector_top_k=retrieval_data.get("vector_top_k", 20),
@@ -287,6 +290,7 @@ class MemoryGraphConfig:
                 "rule_dict_path": self.extraction.rule_dict_path,
                 "chunk_timeout_ms": self.extraction.chunk_timeout_ms,
                 "llm_fallback_threshold": self.extraction.llm_fallback_threshold,
+                "entity_dicts_path": self.extraction.entity_dicts_path,
             },
             "retrieval": {
                 "vector_top_k": self.retrieval.vector_top_k,

@@ -188,6 +188,8 @@ plugins:
           chunk_mode: "spacy"           # rule(最快) / spacy(中等) / llm_fallback(最慢)
           chunk_timeout_ms: 100
           llm_fallback_threshold: 0    # 禁用 LLM 后备
+        # 实体词典配置文件（支持自定义中文技术术语、实体后缀、技术白名单等）
+          entity_dicts_path: "./plugins/tinyrag_memory_graph/entity_dicts.yaml"  # ← 新增
           spacy_model: "zh_core_web_sm"
         # 队列配置（控制并发）
         queue:

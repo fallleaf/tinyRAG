@@ -506,6 +506,8 @@ class MemoryGraphPlugin(PluginBase):
                             "base_final_score": er.base_final_score,  # 保留基础检索分数
                             "semantic_score": final_semantic,  # 保留原始语义分（keyword 模式下应为 0）
                             "keyword_score": orig.get("keyword_score", er.keyword_score),  # 保留原始关键词得分
+                            "confidence_score": orig.get("confidence_score", 0.69),  # 保留原始置信度分数
+                            "confidence_reason": orig.get("confidence_reason", ""),  # 保留置信度原因
                         }
                     )
 
