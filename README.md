@@ -86,6 +86,40 @@ python rag_cli.py status
 python main.py
 ```
 
+### Nanobot 集成配置
+
+在 nanobot 的 `config.json` 中添加 tinyRAG MCP 服务配置：
+
+```json
+{
+  "tools": {
+    "mcpServers": {
+      "tinyRAG": {
+        "type": "stdio",
+        "command": "/home/fallleaf/tinyRAG/.venv/bin/python3",
+        "args": ["/home/fallleaf/tinyRAG/main.py"],
+        "cwd": "/home/fallleaf/tinyRAG",
+        "env": {
+          "PYTHONPATH": "/home/fallleaf/tinyRAG/",
+          "PYTHONUNBUFFERED": "1"
+        },
+        "toolTimeout": 120,
+        "enabledTools": ["*"]
+      }
+    }
+  }
+}
+```
+
+**配置说明**：
+- `type`: 使用 stdio 通信方式
+- `command`: Python 虚拟环境路径
+- `args`: tinyRAG MCP 服务入口文件
+- `cwd`: tinyRAG 项目根目录
+- `env`: 设置 Python 路径和禁用缓冲
+- `toolTimeout`: 工具调用超时时间（秒）
+- `enabledTools`: 启用所有工具（`"*"`）
+
 ## MCP 接口
 
 ### Tools（工具）
