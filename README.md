@@ -1,6 +1,6 @@
 # tinyRAG - 轻量级中文 RAG 系统
 
-> **v1.1.4** | 检索增强生成系统，专为中文知识库设计
+> **v1.1.5** | 检索增强生成系统，专为中文知识库设计
 
 ## 项目简介
 
@@ -92,10 +92,13 @@ python main.py
 
 | 工具 | 功能 | 参数 |
 |------|------|------|
-| `search` | 混合检索 | query, mode, top_k |
+| `search` | 混合检索 | query, mode, top_k, alpha, beta, vaults |
 | `stats` | 知识库统计 | 无 |
 | `scan_index` | 增量扫描 | 无 |
 | `rebuild_index` | 重建索引 | 无 |
+| `maintenance` | 数据库维护 | dry_run |
+| `config` | 获取配置 | 无 |
+| `reload_config` | 重新加载配置 | 无 |
 
 ### Resources（资源）
 
@@ -109,10 +112,10 @@ python main.py
 
 ### Prompts（提示词）
 
-| 提示词 | 功能 |
-|--------|------|
-| `search_with_context` | 检索增强回答 |
-| `summarize_document` | 文档摘要 |
+| 提示词 | 功能 | 参数 |
+|--------|------|------|
+| `search_with_context` | 检索增强回答 | query, top_k, alpha, beta, vaults |
+| `summarize_document` | 文档摘要 | file_path |
 
 ## 配置示例
 
@@ -144,6 +147,7 @@ vaults:
 - [项目总览](docs/README.md) - 详细功能介绍
 - [部署指南](docs/DEPLOYMENT.md) - 生产环境部署
 - [快速参考](docs/QUICK_REFERENCE.md) - 命令速查
+- [MCP 工具使用](docs/MCP_TOOLS_USAGE.md) - MCP 工具完整使用文档
 
 ## 许可证
 
@@ -151,4 +155,4 @@ MIT License
 
 ---
 
-*版本: v1.1.4 | 最后更新: 2026-04-14*
+*版本: v1.1.5 | 最后更新: 2026-04-23*
