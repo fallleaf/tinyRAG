@@ -3,7 +3,8 @@ vaults:
     name: personal
     enabled: true
     exclude:
-      dirs: []
+      dirs:
+        - "10.模板"
       patterns: []
   - path: "/home/fallleaf/Obsidian"
     name: work
@@ -146,5 +147,6 @@ retrieval:
   alpha: 0.6
   beta: 0.4
 jieba_user_dict: "data/jieba_user_dict.txt"
+jieba_seg_mode: "precise"
 stream_batch_size: 64
 max_concurrent_files: 4

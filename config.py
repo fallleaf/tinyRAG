@@ -80,6 +80,7 @@ class Settings(BaseModel):
     maintenance: dict[str, Any] = {"soft_delete_threshold": 0.2, "auto_vacuum": True}
     cache: CacheConfig = Field(default_factory=CacheConfig)
     jieba_user_dict: str = ""
+    jieba_seg_mode: Literal["precise", "search"] = "precise"
     exclude: ExcludeConfig = Field(default_factory=ExcludeConfig)
     stream_batch_size: int = 100
     max_concurrent_files: int = 4
