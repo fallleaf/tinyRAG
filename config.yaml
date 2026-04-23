@@ -87,7 +87,7 @@ embedding_model:
   cache_dir: "~/.cache/fastembed"
   size: "small"
   dimensions: 512
-  batch_size: 32
+  batch_size: 64
   unload_after_seconds: 300
 
 chunking:
@@ -148,5 +148,5 @@ retrieval:
   beta: 0.4
 jieba_user_dict: "data/jieba_user_dict.txt"
 jieba_seg_mode: "precise"
-stream_batch_size: 64
+stream_batch_size: 128
 max_concurrent_files: 4
