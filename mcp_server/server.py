@@ -21,7 +21,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, ClassVar
 
-from utils.jieba_helper import jieba_segment  # ✅ DRY 重构：统一分词入口
+from utils.jieba_helper import jieba_segment, load_jieba_user_dict  # ✅ DRY 重构：统一分词入口
 from utils.logger import setup_logger
 
 # MCP - 导入所有需要的类型
@@ -119,6 +119,9 @@ class AppContext:
                 )
                 retriever = HybridEngine(config=config, db=db, embed_engine=embed_engine)
                 splitter = MarkdownSplitter(config)
+
+                # 加载 jieba 自定义词典与分词模式，确保 FTS5 分词与 build_index 一致
+                load_jieba_user_dict(config)
 
                 self.config = config
                 self.db = db
@@ -344,6 +347,9 @@ class ScanTool(BaseTool):
             return
 
         batch_size = self.ctx.config.embedding_model.batch_size
+        # 从数据库获取当前最大 chunk_index，避免与已有数据冲突
+        row = self.ctx.db.conn.execute("SELECT COALESCE(MAX(chunk_index), -1) FROM chunks").fetchone()
+        global_chunk_idx = row[0] + 1 if row else 0
         processed = 0
         for i in range(0, len(all_pending_chunks), batch_size):
             batch = all_pending_chunks[i : i + batch_size]
@@ -357,7 +363,7 @@ class ScanTool(BaseTool):
             try:
                 self.ctx.db.conn.execute("PRAGMA synchronous = OFF;")
                 for idx, ((file_id, chunk, f_path), emb) in enumerate(zip(batch, embeddings, strict=False)):
-                    global_idx = processed + idx
+                    chunk_idx = global_chunk_idx + processed + idx
                     metadata_json = json.dumps(chunk.metadata or {}, ensure_ascii=False, default=_json_serialize)
                     confidence_json = json.dumps(
                         chunk.confidence_metadata or {}, ensure_ascii=False, default=_json_serialize
@@ -368,7 +374,7 @@ class ScanTool(BaseTool):
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                         (
                             file_id,
-                            global_idx,
+                            chunk_idx,
                             chunk.content,
                             chunk.content_type.value,
                             chunk.section_title,
@@ -789,7 +795,11 @@ class PromptManager:
 # Helpers (已替换为 utils.jieba_helper)
 # =====================
 def _prepare_fts_content(chunk, file_path: str) -> str:
-    """FTS5 复合检索文本构建 (使用统一 jieba_segment)"""
+    """FTS5 复合检索文本构建 (使用统一 jieba_segment)
+
+    注意：需与 build_index.prepare_fts_content 保持一致，
+    filename 和 section_title 各重复2次以提升 FTS5 关键词权重。
+    """
     metadata = chunk.metadata or {}
     tags = metadata.get("tags", []) or []
     if isinstance(tags, str):
@@ -797,14 +807,12 @@ def _prepare_fts_content(chunk, file_path: str) -> str:
     tag_str = " ".join([f"#{t.strip()}" for t in tags if t])
     doc_type = metadata.get("doc_type") or ""
     filename = os.path.basename(file_path)
-    section = chunk.section_title or ""
+    section_title = chunk.section_title or ""
     parts = [
-        jieba_segment(filename),
-        jieba_segment(chunk.section_path or ""),
-        jieba_segment(section),
-        jieba_segment(tag_str),
-        jieba_segment(doc_type),
-        jieba_segment(chunk.content),
+        jieba_segment(filename), jieba_segment(filename),
+        jieba_segment(chunk.section_path or ""), jieba_segment(section_title),
+        jieba_segment(section_title), jieba_segment(tag_str),
+        jieba_segment(doc_type), jieba_segment(chunk.content),
     ]
     return " ".join(filter(None, parts)).strip()
 
