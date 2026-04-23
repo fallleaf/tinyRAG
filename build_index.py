@@ -72,11 +72,18 @@ def process_and_commit_batch(chunks: list[tuple[int, Any, str]], embedder: Embed
     if commit: db.conn.commit()
     return start_idx + len(chunks)
 
-def main():
-    parser = argparse.ArgumentParser(description="tinyRAG 高性能索引构建器")
-    parser.add_argument("--force", action="store_true", help="重建所有索引")
-    parser.add_argument("--batch-size", type=int, default=128, help="向量化批大小")
-    args = parser.parse_args()
+def main(args: argparse.Namespace | None = None):
+    """构建索引入口
+
+    Args:
+        args: 可选的预解析参数。为 None 时从命令行解析（CLI 调用）；
+              为 argparse.Namespace 时直接使用（MCP server 等程序化调用）。
+    """
+    if args is None:
+        parser = argparse.ArgumentParser(description="tinyRAG 高性能索引构建器")
+        parser.add_argument("--force", action="store_true", help="重建所有索引")
+        parser.add_argument("--batch-size", type=int, default=128, help="向量化批大小")
+        args = parser.parse_args()
     try:
         config = load_config("config.yaml")
     except Exception as e:
